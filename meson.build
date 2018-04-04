@@ -1,7 +1,12 @@
-project('radare2', 'c')
+project('radare2', 'c', meson_version: '>=0.45.0')
+
+py3_exe = import('python3').find_python()
+git_exe = find_program('git')
+pkgconfig_mod = import('pkgconfig')
+glob_cmd = [py3_exe, '-c', 'from sys import argv; print(";".join(__import__("glob").glob(argv[1])))']
 
 # Get r2 version
-r2version = run_command('python', 'sys/version.py')
+r2version = run_command(py3_exe, 'sys/version.py')
 if r2version.returncode() != 0
   r2version = 'unknown-error'
 else
@@ -13,16 +18,16 @@ if meson.is_subproject()
   repo = meson.current_source_dir()
   if host_machine.system() == 'windows'
     py_cmd = 'print(__import__("os").readlink(r"@0@"))'.format(repo)
-    py_cmd = run_command('python', '-c', py_cmd)
+    py_cmd = run_command(py3_exe, '-c', py_cmd)
     if py_cmd.returncode() == 0
       repo = py_cmd.stdout().strip()
-      message('r2 realpath: ' + repo)
+      message('r2 real path: ' + repo)
     endif
   endif
 endif
 
 # Get version_commit
-version_commit = run_command('git', '-C', repo, 'rev-list', '--all', '--count')
+version_commit = run_command(git_exe, '-C', repo, 'rev-list', '--all', '--count')
 if version_commit.returncode() != 0
   version_commit = 0
 else
@@ -30,7 +35,7 @@ else
 endif
 
 # Get gittap
-gittap  = run_command('git', '-C', repo, 'describe', '--tags', '--match', '[0-9]*')
+gittap  = run_command(git_exe, '-C', repo, 'describe', '--tags', '--match', '[0-9]*')
 if gittap.returncode() != 0
   gittap = ''
 else
@@ -38,7 +43,7 @@ else
 endif
 
 # Get gittip
-gittip  = run_command('git', '-C', repo, 'rev-parse', 'HEAD')
+gittip  = run_command(git_exe, '-C', repo, 'rev-parse', 'HEAD')
 if gittip.returncode() != 0
   gittip = 'unknown'
 else
@@ -57,8 +62,6 @@ else
   r2birth = r2birth.stdout().strip()
 endif
 
-prefix = '/usr/local'
-
 # system dependencies
 cc = meson.get_compiler('c')
 # required for linux
@@ -67,32 +70,17 @@ pth = cc.find_library('pthread', required: false)
 utl = cc.find_library('util', required: false)
 mth = cc.find_library('m', required: false)
 
-# detect OS
-if cc.get_define('__linux__') == '1'
-  host_os = 'linux'
-else
-  host_os = 'darwin'
-endif
-
 platform_deps = []
-platform_inc = include_directories(['.', 'libr/include'])
+platform_inc = ['.', 'libr/include']
 if host_machine.system() == 'windows'
   platform_deps = [cc.find_library('ws2_32')]
-  platform_inc = include_directories(['.', 'libr/include', 'libr/include/msvc'])
-  host_os = 'windows'
-  if get_option('default_library') == 'static'
-    if get_option('buildtype') == 'release' and not meson.is_subproject()
-      add_project_arguments('/MT', language: 'c')
-    endif
-    message(' ------ WINDOWS VERSION: BUILD STATIC ------')
-  else
-    message(' ------ WINDOWS VERSION: BUILD SHARED ------')
-  endif
-elif host_machine.system() == 'linux'
-  if get_option('default_library') == 'static'
-    message(' ------ LINUX VERSION: BUILD STATIC ------')
-  else
-    message(' ------ LINUX VERSION: BUILD SHARED ------')
+  platform_inc += ['libr/include/msvc']
+endif
+platform_inc = include_directories(platform_inc)
+
+if get_option('static_runtime')
+  if cc.get_id() == 'msvc'
+    add_project_arguments('/MT', language: 'c')
   endif
 endif
 
@@ -112,16 +100,18 @@ conf_data.set('plugins_debug', '&r_debug_plugin_' + ',&r_debug_plugin_'.join(deb
 conf_data.set('plugins_egg', '&r_egg_plugin_' + ',&r_egg_plugin_'.join(egg) + ', 0')
 conf_data.set('plugins_lang', '&r_lang_plugin_' + ',&r_lang_plugin_'.join(lang) + ', 0')
 conf_data.set('plugins_parse', '&r_parse_plugin_' + ',&r_parse_plugin_'.join(parse) + ', 0')
-configure_file(input: 'libr/config.h.in',
-               output: 'config.h',
-               configuration: conf_data)
+config_h = configure_file(
+  input: 'libr/config.h.in',
+  output: 'config.h',
+  configuration: conf_data
+)
 
 userconf = configuration_data()
 userconf.set('DEBUGGER', 1)
-userconf.set('PREFIX', prefix)
-userconf.set('LIBDIR', prefix + '/lib')
-userconf.set('INCLUDEDIR', prefix + '/include')
-userconf.set('DATADIR', prefix + '/share')
+userconf.set('PREFIX', get_option('prefix'))
+userconf.set('LIBDIR', join_paths(get_option('prefix'), get_option('libdir')))
+userconf.set('INCLUDEDIR', join_paths(get_option('prefix'), get_option('includedir')))
+userconf.set('DATADIR', join_paths(get_option('prefix'), get_option('datadir')))
 userconf.set('HAVE_LIB_MAGIC', 0)
 userconf.set('USE_LIB_MAGIC', 0)
 userconf.set('HAVE_OPENSSL', 0)
@@ -132,9 +122,12 @@ if host_machine.system() == 'windows'
 else
   userconf.set('HAVE_JEMALLOC', 1)
 endif
-configure_file(input: 'libr/include/r_userconf.h.in',
-               output: 'r_userconf.h',
-               configuration: userconf)
+r_userconf_h = configure_file(
+  input: 'libr/include/r_userconf.h.in',
+  output: 'r_userconf.h',
+  configuration: userconf
+)
+install_headers(r_userconf_h, subdir: 'libr')
 
 versionconf = configuration_data()
 versionconf.set('VERSIONCOMMIT', version_commit)
@@ -142,14 +135,29 @@ versionconf.set('R2_VERSION', r2version)
 versionconf.set('R2_GITTAP', gittap)
 versionconf.set('R2_GITTIP', gittip)
 versionconf.set('R2_BIRTH', r2birth)
-configure_file(input: 'libr/include/r_version.h.in',
-               output: 'r_version.h',
-               configuration: versionconf)
+r_version_h = configure_file(
+  input: 'libr/include/r_version.h.in',
+  output: 'r_version.h',
+  configuration: versionconf
+)
+install_headers(r_version_h, subdir: 'libr')
 
 # Copy missing header
-run_command('python', '-c', '__import__("shutil").copyfile("shlr/spp/config.def.h", "shlr/spp/config.h")')
+run_command(py3_exe, '-c', '__import__("shutil").copyfile("shlr/spp/config.def.h", "shlr/spp/config.h")')
 
-subdir('shlr/')
+pcconf = configuration_data()
+pcconf.set('PREFIX', get_option('prefix'))
+pcconf.set('LIBDIR', join_paths(get_option('prefix'), get_option('libdir')))
+pcconf.set('VERSION', r2version)
+libr_pc = configure_file(
+  input: 'libr/libr.pc.acr',
+  output: 'libr.pc',
+  configuration: userconf
+)
+install_data(libr_pc, install_dir: join_paths(get_option('libdir'), 'pkgconfig'))
+
+subdir('shlr')
+
 subdir('libr/util')
 subdir('libr/hash')
 subdir('libr/crypto')
@@ -173,7 +181,27 @@ subdir('libr/fs')
 subdir('libr/debug')
 subdir('libr/core')
 
-if meson.is_subproject()
+subdir('shlr/sdb')
+
+subdir('libr/anal/d')
+subdir('libr/asm/d')
+subdir('libr/bin/d')
+subdir('libr/syscall/d')
+subdir('libr/cons/d')
+subdir('libr/magic/d')
+
+if not meson.is_subproject()
+  subdir('binr/rahash2')
+  subdir('binr/rarun2')
+  subdir('binr/rasm2')
+  subdir('binr/rabin2')
+  subdir('binr/radare2')
+  subdir('binr/ragg2')
+  subdir('binr/r2agent')
+  subdir('binr/radiff2')
+  subdir('binr/rafind2')
+  subdir('binr/rax2')
+else
   libr2_lib = [
     r_anal, r_asm, r_bin, r_bp, r_config, r_cons, r_core, r_crypto, r_egg,
     r_flag, r_fs, r_hash, r_io, r_lang, r_magic, r_parse, r_reg, r_search,
@@ -185,15 +213,33 @@ if meson.is_subproject()
     include_directories: libr2_inc,
     version: r2version
   )
-else
-  subdir('binr/rahash2')
-  subdir('binr/rarun2')
-  subdir('binr/rasm2')
-  subdir('binr/rabin2')
-  subdir('binr/radare2')
-  subdir('binr/ragg2')
-  subdir('binr/r2agent')
-  subdir('binr/radiff2')
-  subdir('binr/rafind2')
-  subdir('binr/rax2')
 endif
+
+install_subdir('shlr/www',
+  install_dir: join_paths(get_option('prefix'), get_option('datadir'), 'radare2', r2version)
+)
+
+fortunes_files = run_command(glob_cmd + ['doc/fortunes.*']).stdout().strip().split(';')
+install_data(fortunes_files,
+  install_dir: join_paths(get_option('datadir'), 'doc/radare2')
+)
+
+man1_files = run_command(glob_cmd + ['man/*.1']).stdout().strip().split(';')
+install_data(man1_files,
+  install_dir: join_paths(get_option('mandir'), 'man1')
+)
+
+man7_files = run_command(glob_cmd + ['man/*.7']).stdout().strip().split(';')
+install_data(man7_files,
+  install_dir: join_paths(get_option('mandir'), 'man7')
+)
+
+custom_target('hud',
+  input: 'doc/hud',
+  output: 'main',
+  command: [py3_exe, '-c', 'from sys import argv; __import__("shutil").copy(argv[1], argv[2])', '@INPUT@', '@OUTPUT@'],
+  build_by_default: true,
+  build_always: false,
+  install: true,
+  install_dir: join_paths(get_option('prefix'), get_option('datadir'), 'radare2', r2version, 'hud')
+)

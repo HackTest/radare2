@@ -1,4 +1,4 @@
-/* radare2 - LGPL - Copyright 2009-2017 - pancake */
+/* radare2 - LGPL - Copyright 2009-2018 - pancake */
 
 #include <r_core.h>
 #include <r_socket.h>
@@ -495,7 +495,7 @@ static ut64 num_callback(RNum *userptr, const char *str, int *ok) {
 			*ok = 1;
 		}
 		// TODO: group analop-dependant vars after a char, so i can filter
-		r_anal_op (core->anal, &op, core->offset, core->block, core->blocksize);
+		r_anal_op (core->anal, &op, core->offset, core->block, core->blocksize, R_ANAL_OP_MASK_ALL);
 		r_anal_op_fini (&op); // we dont need strings or pointers, just values, which are not nullified in fini
 		switch (str[1]) {
 		case '.': // can use pc, sp, a0, a1, ...
@@ -717,7 +717,7 @@ static const char *radare_argv[] = {
 	"q", "q!",
 	"f", "fl", "fr", "f-", "f*", "fs", "fS", "fr", "fo", "f?",
 	"m", "m*", "ml", "m-", "my", "mg", "md", "mp", "m?",
-	"o", "o+", "oc", "on", "op", "o-", "x", "wf", "wF", "wta", "wtf", "wp",
+	"o", "o+", "oc", "on", "op", "o-", "x", "wf", "wF", "wt", "wta", "wtf", "wp",
 	"t", "to", "t-", "tf", "td", "td-", "tb", "tn", "te", "tl", "tk", "ts", "tu",
 	"(", "(*", "(-", "()", ".", ".!", ".(", "./",
 	"r", "r+", "r-",
@@ -825,8 +825,12 @@ out:
 static void autocompleteFilename(RLine *line, char **extra_paths, int narg) {
 	char *args = NULL, *input = NULL;
 	int n = 0, i = 0;
-
-	args = r_str_new (line->buffer.data);
+	char *pipe = strchr (line->buffer.data, '>');
+	if (pipe) {
+		args = r_str_new (pipe + 1);
+	} else {
+		args = r_str_new (line->buffer.data);
+	}
 	if (!args) {
 		goto out;
 	}
@@ -870,8 +874,11 @@ static int autocomplete(RLine *line) {
 	RFlagItem *flag;
 	if (core) {
 		r_core_free_autocomplete (core);
+		char *pipe = strchr (line->buffer.data, '>');
 		char *ptr = strchr (line->buffer.data, '@');
-		if (ptr && strchr (ptr + 1, ' ') && line->buffer.data+line->buffer.index >= ptr) {
+		if (pipe && strchr (pipe + 1, ' ') && line->buffer.data+line->buffer.index >= pipe) {
+			autocompleteFilename (line, NULL, 1);
+		} else if (ptr && strchr (ptr + 1, ' ') && line->buffer.data+line->buffer.index >= ptr) {
 			int sdelta, n, i = 0;
 			ptr = (char *)r_str_trim_ro (ptr+1);
 			n = strlen (ptr);//(line->buffer.data+sdelta);
@@ -1086,6 +1093,7 @@ static int autocomplete(RLine *line) {
 		|| !strncmp (line->buffer.data, "wtf ", 4)
 		|| !strncmp (line->buffer.data, "wxf ", 4)
 		|| !strncmp (line->buffer.data, "dml ", 4)
+		|| !strncmp (line->buffer.data, "vim ", 4)
 		|| !strncmp (line->buffer.data, "less ", 5)
 		|| !strncmp (line->buffer.data, "ls -l ", 6)) {
 			autocompleteFilename (line, NULL, 1);
@@ -1228,9 +1236,11 @@ static int autocomplete(RLine *line) {
 		|| !strncmp (line->buffer.data, "agfl ", 5)
 		|| !strncmp (line->buffer.data, "aecu ", 5)
 		|| !strncmp (line->buffer.data, "aesu ", 5)
-		|| !strncmp (line->buffer.data, "aeim ", 5)) {
+		|| !strncmp (line->buffer.data, "aeim ", 5)
+		|| line->offset_prompt) {
 			int n, i = 0;
-			int sdelta = (line->buffer.data[1] == ' ')
+			int sdelta = line->offset_prompt 
+				? 0 : (line->buffer.data[1] == ' ')
 				? 2 : (line->buffer.data[2] == ' ')
 				? 3 : (line->buffer.data[3] == ' ')
 				? 4 : 5;
@@ -1720,6 +1730,10 @@ static bool r_core_anal_log(struct r_anal_t *anal, const char *msg) {
 	return true;
 }
 
+static bool r_core_anal_read_at(struct r_anal_t *anal, ut64 addr, ut8 *buf, int len) {
+	return r_io_read_at (anal->iob.io, addr, buf, len);
+}
+
 R_API bool r_core_init(RCore *core) {
 	core->blocksize = R_CORE_BLOCKSIZE;
 	core->block = (ut8*)calloc (R_CORE_BLOCKSIZE + 1, 1);
@@ -1777,6 +1791,10 @@ R_API bool r_core_init(RCore *core) {
 	core->egg = r_egg_new ();
 	r_egg_setup (core->egg, R_SYS_ARCH, R_SYS_BITS, 0, R_SYS_OS);
 
+	core->undos = r_list_newf ((RListFree)r_core_undo_free);
+	core->fixedarch = false;
+	core->fixedbits = false;
+
 	/* initialize libraries */
 	core->cons = r_cons_new ();
 	if (core->cons->refcnt == 1) {
@@ -1813,11 +1831,12 @@ R_API bool r_core_init(RCore *core) {
 	r_asm_set_user_ptr (core->assembler, core);
 	core->anal = r_anal_new ();
 	core->anal->log = r_core_anal_log;
+	core->anal->read_at = r_core_anal_read_at;
 	core->anal->meta_spaces.cb_printf = r_cons_printf;
 	core->anal->cb.on_fcn_new = on_fcn_new;
 	core->anal->cb.on_fcn_delete = on_fcn_delete;
 	core->anal->cb.on_fcn_rename = on_fcn_rename;
-	core->assembler->syscall = core->anal->syscall; // BIND syscall anal/asm
+	core->assembler->syscall = r_syscall_ref (core->anal->syscall); // BIND syscall anal/asm
 	r_anal_set_user_ptr (core->anal, core);
 	core->anal->cb_printf = (void *) r_cons_printf;
 	core->parser = r_parse_new ();
@@ -1911,6 +1930,8 @@ R_API RCore *r_core_fini(RCore *c) {
 	//update_sdb (c);
 	// avoid double free
 	r_core_free_autocomplete (c);
+	R_FREE (c->cmdlog);
+	r_th_lock_free (c->lock);
 	R_FREE (c->lastsearch);
 	c->cons->pager = NULL;
 	r_core_task_join (c, NULL);
@@ -1924,6 +1945,7 @@ R_API RCore *r_core_fini(RCore *c) {
 		c->cons->num = c->old_num;
 		c->old_num = NULL;
 	}
+	r_list_free (c->undos);
 	r_num_free (c->num);
 	// TODO: sync or not? sdb_sync (c->sdb);
 	// TODO: sync all dbs?
@@ -2070,8 +2092,9 @@ static void set_prompt (RCore *r) {
 	// TODO: also in visual prompt and disasm/hexdump ?
 	if (r_config_get_i (r->config, "asm.segoff")) {
 		ut32 a, b;
+		unsigned int seggrn = r_config_get_i (r->config, "asm.seggrn");
 
-		a = ((r->offset >> 16) << 12);
+		a = ((r->offset >> 16) << (16 - seggrn));
 		b = (r->offset & 0xffff);
 		snprintf (tmp, 128, "%04x:%04x", a, b);
 	} else {
@@ -2226,7 +2249,7 @@ R_API RAnalOp *r_core_op_anal(RCore *core, ut64 addr) {
 	ut8 buf[64];
 	RAnalOp *op = R_NEW (RAnalOp);
 	r_core_read_at (core, addr, buf, sizeof (buf));
-	r_anal_op (core->anal, op, addr, buf, sizeof (buf));
+	r_anal_op (core->anal, op, addr, buf, sizeof (buf), R_ANAL_OP_MASK_ALL);
 	return op;
 }
 
@@ -2515,11 +2538,12 @@ R_API int r_core_search_cb(RCore *core, ut64 from, ut64 to, RCoreSearchCallback 
 }
 
 R_API char *r_core_editor (const RCore *core, const char *file, const char *str) {
+	const bool interactive = r_config_get_i (core->config, "scr.interactive");
 	const char *editor = r_config_get (core->config, "cfg.editor");
 	char *name, *ret = NULL;
 	int len, fd;
 
-	if (!editor || !*editor) {
+	if (!interactive || !editor || !*editor) {
 		return NULL;
 	}
 	if (file) {

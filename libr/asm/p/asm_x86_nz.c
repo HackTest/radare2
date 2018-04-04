@@ -1384,7 +1384,7 @@ static int oples(RAsm *a, ut8* data, const Opcode *op) {
 
 static int opmov(RAsm *a, ut8 *data, const Opcode *op) {
 	int l = 0;
-	long offset = 0;
+	st64 offset = 0;
 	int mod = 0;
 	int base = 0;
 	int rex = 0;
@@ -4361,7 +4361,7 @@ static int parseOpcode(RAsm *a, const char *op, Opcode *out) {
 	}
 	parseOperand (a, args, &(out->operands[0]), isrepop);
 	out->operands_count = 1;
-	while (out->operands_count <= MAX_OPERANDS) {
+	while (out->operands_count < MAX_OPERANDS) {
 		args = strchr (args, ',');
 		if (!args) {
 			break;

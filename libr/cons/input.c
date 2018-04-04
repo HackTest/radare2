@@ -430,7 +430,7 @@ static char *readbuffer = NULL;
 static int readbuffer_length = 0;
 
 R_API bool r_cons_readpush(const char *str, int len) {
-	char *res = realloc (readbuffer, len + readbuffer_length);
+	char *res = (len + readbuffer_length > 0) ? realloc (readbuffer, len + readbuffer_length) : NULL;
 	if (res) {
 		readbuffer = res;
 		memmove (readbuffer + readbuffer_length, str, len);
@@ -489,6 +489,8 @@ R_API int r_cons_yesno(int def, const char *fmt, ...) {
 	fflush (stderr);
 	r_cons_set_raw (true);
 	(void)read (0, &key, 1);
+	write (2, " ", 1);
+	write (2, &key, 1);
 	write (2, "\n", 1);
 	if (key == 'Y') {
 		key = 'y';

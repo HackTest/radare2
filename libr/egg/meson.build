@@ -1,5 +1,6 @@
 files = [
   'egg.c',
+  'egg_Cfile.c',
   'egg_lang.c',
   'emit_arm.c',
   'emit_trace.c',
@@ -19,5 +20,18 @@ r_egg = library('r_egg', files,
   c_args: ['-DCORELIB=1'],
   link_with: [r_util, r_asm, r_syscall, libr_shlr],
   install: true,
-  implicit_include_directories: false
+  implicit_include_directories: false,
+  soversion: r2version
+)
+
+pkgconfig_mod.generate(
+  libraries: [r_egg],
+  subdirs: 'libr',
+  version: r2version,
+  name: 'r_egg',
+  filebase: 'r_egg',
+  requires: [
+    'r_util', 'r_asm', 'r_syscall'
+  ],
+  description: 'radare foundation libraries'
 )

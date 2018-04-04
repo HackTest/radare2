@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2010-2017 - pancake */
+/* radare - LGPL - Copyright 2010-2018 - pancake */
 
 #include <stddef.h>
 
@@ -29,6 +29,8 @@ static const char *help_msg_slash[] = {
 	"/E", " esil-expr", "offset matching given esil expressions %%= here",
 	"/f", "", "search forwards, command modifier, followed by other command",
 	"/F", " file [off] [sz]", "search contents of file with offset and size",
+	// TODO: add subcommands to find paths between functions and filter only function names instead of offsets, etc
+	"/g", " [from]", "find all graph paths from A to current offset (inside current function)",
 	"/h", "[t] [hash] [len]", "find block matching this hash. See /#?",
 	"/i", " foo", "search for string 'foo' ignoring case",
 	"/m", " magicfile", "search for matching magic file (use blocksize)",
@@ -1046,7 +1048,7 @@ static void print_rop(RCore *core, RList *hitlist, char mode, bool *json_first) 
 			r_core_read_at (core, hit->addr, buf, hit->len);
 			r_asm_set_pc (core->assembler, hit->addr);
 			r_asm_disassemble (core->assembler, &asmop, buf, hit->len);
-			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len);
+			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len, R_ANAL_OP_MASK_ALL);
 			size += hit->len;
 			if (analop.type != R_ANAL_OP_TYPE_RET) {
 				char *opstr_n = r_str_newf (" %s", R_STRBUF_SAFEGET (&analop.esil));
@@ -1079,7 +1081,7 @@ static void print_rop(RCore *core, RList *hitlist, char mode, bool *json_first) 
 			r_core_read_at (core, hit->addr, buf, hit->len);
 			r_asm_set_pc (core->assembler, hit->addr);
 			r_asm_disassemble (core->assembler, &asmop, buf, hit->len);
-			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len);
+			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len, R_ANAL_OP_MASK_ALL);
 			size += hit->len;
 			const char *opstr = R_STRBUF_SAFEGET (&analop.esil);
 			if (analop.type != R_ANAL_OP_TYPE_RET) {
@@ -1119,7 +1121,7 @@ static void print_rop(RCore *core, RList *hitlist, char mode, bool *json_first) 
 			r_core_read_at (core, hit->addr, buf, hit->len);
 			r_asm_set_pc (core->assembler, hit->addr);
 			r_asm_disassemble (core->assembler, &asmop, buf, hit->len);
-			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len);
+			r_anal_op (core->anal, &analop, hit->addr, buf, hit->len, R_ANAL_OP_MASK_ALL);
 			size += hit->len;
 			if (analop.type != R_ANAL_OP_TYPE_RET) {
 				char *opstr_n = r_str_newf (" %s", R_STRBUF_SAFEGET (&analop.esil));
@@ -1235,6 +1237,13 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 	RIOMap *map;
 	RAsmOp asmop;
 
+	Sdb *gadgetSdb;
+	if (!(gadgetSdb = sdb_ns (core->sdb, "gadget_sdb", false))) {
+		gadgetSdb = sdb_ns (core->sdb, "gadget_sdb", true);
+	} else {
+		gadgetSdb = NULL;
+	}
+
 	if (max_count == 0) {
 		max_count = -1;
 	}
@@ -1303,12 +1312,7 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 		map = R_NEW0 (RIOMap);
 		if (!map) {
 			eprintf ("Cannot allocate map\n");
-			free (gregexp);
-			r_list_free (rx_list);
-			r_list_free (end_list);
-			r_list_free (badstart);
-			r_list_free (list);
-			return false;
+			goto bad;
 		}
 		map->fd = core->io->desc->fd;
 		map->itv.addr = from;
@@ -1335,12 +1339,7 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 		delta = to - from;
 		buf = calloc (1, delta);
 		if (!buf) {
-			free (gregexp);
-			r_list_free (rx_list);
-			r_list_free (end_list);
-			r_list_free (badstart);
-			r_list_free (list);
-			return -1;
+			goto bad;
 		}
 		(void) r_io_read_at (core->io, from, buf, delta);
 
@@ -1349,7 +1348,7 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 			RAnalOp end_gadget = R_EMPTY;
 			// Disassemble one.
 			if (r_anal_op (core->anal, &end_gadget, from + i, buf + i,
-				    delta - i) <= 0) {
+				    delta - i, R_ANAL_OP_MASK_ALL) <= 0) {
 				r_anal_op_fini (&end_gadget);
 				continue;
 			}
@@ -1450,6 +1449,28 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 					if (align && (0 != ((from + i) % align))) {
 						continue;
 					}
+
+					if (gadgetSdb) {
+						RListIter *iter;
+
+						RCoreAsmHit *hit = (RCoreAsmHit *) hitlist->head->data;
+						char *headAddr = r_str_newf ("%"PFMT64x, hit->addr);
+						if (!headAddr) {
+							goto bad;
+						}
+
+						r_list_foreach (hitlist, iter, hit) {
+							char *addr = r_str_newf ("%"PFMT64x"(%"PFMT32d")", hit->addr, hit->len);
+							if (!addr) {
+								free (headAddr);
+								goto bad;
+							}
+							sdb_concat (gadgetSdb, headAddr, addr, 0);
+							free (addr);
+						}
+						free (headAddr);
+					}
+
 					if (json) {
 						mode = 'j';
 					}
@@ -1491,6 +1512,14 @@ static int r_core_search_rop(RCore *core, RInterval search_itv, int opt, const c
 	free (gregexp);
 
 	return true;
+
+bad:
+	r_list_free (list);
+	r_list_free (rx_list);
+	r_list_free (end_list);
+	r_list_free (badstart);
+	free (gregexp);
+	return false;
 }
 
 static int esil_addrinfo(RAnalEsil *esil) {
@@ -1537,8 +1566,9 @@ static void do_esil_search(RCore *core, struct search_parameters *param, const c
 		ut64 nres, addr;
 		ut64 from = map->itv.addr;
 		ut64 to = r_itv_end (map->itv);
+		unsigned int addrsize = r_config_get_i (core->config, "esil.addr.size");
 		if (!core->anal->esil) {
-			core->anal->esil = r_anal_esil_new (stacksize, iotrap);
+			core->anal->esil = r_anal_esil_new (stacksize, iotrap, addrsize);
 		}
 		/* hook addrinfo */
 		core->anal->esil->cb.user = core;
@@ -1653,7 +1683,7 @@ static int emulateSyscallPrelude(RCore *core, ut64 at, ut64 curpc) {
 		if (!i) {
 			r_core_read_at (core, curpc, arr, bsize);
 		}
-		inslen = r_anal_op (core->anal, &aop, curpc, arr + i, bsize - i);
+		inslen = r_anal_op (core->anal, &aop, curpc, arr + i, bsize - i, R_ANAL_OP_MASK_ALL);
 		if (inslen) {	
  			int incr = (core->search->align > 0)? core->search->align - 1:  inslen - 1;
 			if (incr < 0) {
@@ -1691,8 +1721,9 @@ static void do_syscall_search(RCore *core, struct search_parameters *param) {
 	int align = core->search->align;
 	int stacksize = r_config_get_i (core->config, "esil.stack.depth");
 	int iotrap = r_config_get_i (core->config, "esil.iotrap");
+	unsigned int addrsize = r_config_get_i (core->config, "esil.addr.size");
 
-	if (!(esil = r_anal_esil_new (stacksize, iotrap))) {
+	if (!(esil = r_anal_esil_new (stacksize, iotrap, addrsize))) {
 		return;
 	}
 	int *previnstr = calloc (MAXINSTR + 1, sizeof (int));
@@ -1733,7 +1764,7 @@ static void do_syscall_search(RCore *core, struct search_parameters *param) {
 			if (!i) {
 				r_core_read_at (core, at, buf, bsize);
 			}
-			ret = r_anal_op (core->anal, &aop, at, buf + i, bsize - i);
+			ret = r_anal_op (core->anal, &aop, at, buf + i, bsize - i, R_ANAL_OP_MASK_ALL);
 			curpos = idx++ % (MAXINSTR + 1);
 			previnstr[curpos] = ret; // This array holds prev n instr size + cur instr size
 			if ((aop.type == R_ANAL_OP_TYPE_SWI) && ret && (aop.val > 10)) {
@@ -1892,7 +1923,7 @@ static void do_anal_search(RCore *core, struct search_parameters *param, const c
 			if (!i) {
 				r_core_read_at (core, at, buf, bsize);
 			}
-			ret = r_anal_op (core->anal, &aop, at, buf + i, bsize - i);
+			ret = r_anal_op (core->anal, &aop, at, buf + i, bsize - i, R_ANAL_OP_MASK_ALL);
 			if (ret) {
 				bool match = false;
 				if (chk_family) {
@@ -1900,7 +1931,9 @@ static void do_anal_search(RCore *core, struct search_parameters *param, const c
 					if (fam) {
 						if (!*input || !strcmp (input, fam)) {
 							match = true;
-							r_cons_printf ("0x%08"PFMT64x " - %d %s\n", at, ret, fam);
+							if (mode == 0) {
+								r_cons_printf ("0x%08"PFMT64x " - %d %s\n", at, ret, fam);
+							}
 						}
 					}
 				} else {
@@ -1977,6 +2010,9 @@ static void do_asm_search(RCore *core, struct search_parameters *param, const ch
 	if (!regexp && input[1] == 'a') {
 		everyByte = true;
 	}
+	if (regexp && input[2] == 'j') {
+		json = true;
+	}
 	if (!end_cmd) {
 		outmode = input[1];
 	} else {
@@ -2019,7 +2055,7 @@ static void do_asm_search(RCore *core, struct search_parameters *param, const ch
 		if (!outmode) {
 			hits = NULL;
 		} else {
-			hits = r_core_asm_strsearch (core, input + 2,
+			hits = r_core_asm_strsearch (core, end_cmd,
 				from, to, maxhits, regexp, everyByte, mode);
 		}
 		if (hits) {
@@ -2599,7 +2635,49 @@ reread:
 				rop_kuery (core, input + 2);
 			}
 		} else {
-			r_core_search_rop (core, search_itv, 0, input + 1, 0);
+			Sdb *gadgetSdb = sdb_ns (core->sdb, "gadget_sdb", false);
+
+			if (!gadgetSdb) {
+				r_core_search_rop (core, search_itv, 0, input + 1, 0);
+			} else {
+				SdbKv *kv;
+				SdbListIter *sdb_iter;
+				SdbList *sdb_list = sdb_foreach_list (gadgetSdb, true);
+
+				ls_foreach (sdb_list, sdb_iter, kv) {
+					RList *hitlist = r_core_asm_hit_list_new ();
+					if (!hitlist) {
+						goto beach;
+					}
+
+					char *s = kv->value;
+					ut64 addr;
+					int opsz;
+					int mode = 0;
+					bool json_first = true;
+
+					// Options, like JSON, linear, ...
+					if (input + 1) {
+						mode = *(input + 1);
+					}
+
+					do {
+						RCoreAsmHit *hit = r_core_asm_hit_new ();
+						if (!hit) {
+							r_list_free (hitlist);
+							goto beach;
+						}
+						sscanf (s, "%"PFMT64x"(%"PFMT32d")", &addr, &opsz);
+						hit->addr = addr;
+						hit->len = opsz;
+						r_list_append (hitlist, hit);
+					} while (*(s = strchr (s, ')') + 1) != '\0');
+
+					print_rop (core, hitlist, mode, &json_first);
+					r_list_free (hitlist);
+				}
+			}
+
 		}
 		goto beach;
 	case 'r': // "/r" and "/re"
@@ -3079,6 +3157,12 @@ reread:
 			} else {
 				search_itv = r_itv_intersect (search_itv, itv);
 			}
+		}
+		break;
+	case 'g': // "/g" graph search
+		{
+			ut64 addr = r_num_math (core->num, input + 1);
+			r_core_anal_paths (core, addr, core->offset);
 		}
 		break;
 	case 'F': // "/F" search file /F [file] ([offset] ([sz]))

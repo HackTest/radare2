@@ -1,4 +1,4 @@
-/* radare2 - LGPL - Copyright 2011-2017 - pancake */
+/* radare2 - LGPL - Copyright 2011-2018 - pancake */
 
 #include <r_fs.h>
 #include "config.h"
@@ -414,7 +414,6 @@ static void r_fs_find_off_aux(RFS* fs, const char* name, ut64 offset, RList* lis
 				if (file->off == offset) {
 					r_list_append (list, found);
 				}
-				free (file->data);
 				r_fs_close (fs, file);
 			}
 		}
@@ -677,11 +676,13 @@ R_API char* r_fs_name(RFS* fs, ut64 offset) {
 
 #define PROMT_PATH_BUFSIZE 1024
 
-R_API int r_fs_prompt(RFS* fs, const char* root) {
+R_API int r_fs_shell_prompt(RFSShell* shell, RFS* fs, const char* root) {
 	char buf[PROMT_PATH_BUFSIZE];
 	char path[PROMT_PATH_BUFSIZE];
+	char prompt[PROMT_PATH_BUFSIZE];
 	char str[2048];
 	char* input;
+	const char* ptr;
 	RList* list = NULL;
 	RListIter* iter;
 	RFSFile* file = NULL;
@@ -701,13 +702,39 @@ R_API int r_fs_prompt(RFS* fs, const char* root) {
 	}
 
 	for (;;) {
-		printf ("[%s]> ", path);
-		fflush (stdout);
-		fgets (buf, sizeof (buf) - 1, stdin);
-		if (feof (stdin)) {
-			break;
+		snprintf (prompt, sizeof (prompt), "[%.*s]> ", (int)sizeof (prompt) - 5, path);
+		if (shell) {
+			if (shell->set_prompt) {
+				shell->set_prompt (prompt);
+			}
+			if (shell->readline) {
+				ptr = shell->readline ();
+			} else {
+				fgets (buf, sizeof (buf) - 1, stdin);
+				if (feof (stdin)) {
+					break;
+				}
+				buf[strlen (buf) - 1] = '\0';
+				ptr = buf;
+			}
+			if (!ptr) {
+				break;
+			}
+			if (shell->hist_add) {
+				shell->hist_add (ptr);
+			}
+			if (ptr != buf) {
+				r_str_ncpy (buf, ptr, sizeof (buf) - 1);
+			}
+		} else {
+			printf ("%s", prompt);
+			fgets (buf, sizeof (buf) - 1, stdin);
+			if (feof (stdin)) {
+				break;
+			}
+			buf[strlen (buf) - 1] = '\0';
 		}
-		buf[strlen (buf) - 1] = '\0';
+
 		if (!strcmp (buf, "q") || !strcmp (buf, "exit")) {
 			r_list_free (list);
 			return true;
@@ -716,6 +743,7 @@ R_API int r_fs_prompt(RFS* fs, const char* root) {
 			r_sandbox_system (buf + 1, 1);
 		} else if (!memcmp (buf, "ls", 2)) {
 			char *ptr = str;
+			r_list_free (list);
 			if (buf[2] == ' ') {
 				if (buf[3] != '/') {
 					strncpy (str, path, sizeof (str) - 1);
@@ -781,6 +809,7 @@ R_API int r_fs_prompt(RFS* fs, const char* root) {
 				path[sizeof (path) - 1] = 0;
 			}
 			r_str_trim_path (path);
+			r_list_free (list);
 			list = r_fs_dir (fs, path);
 			if (r_list_empty (list)) {
 				RFSRoot *root;
@@ -846,7 +875,7 @@ R_API int r_fs_prompt(RFS* fs, const char* root) {
 				strcpy (s, path);
 			}
 			if (!s) {
-				s = malloc (strlen (input) + 32);
+				s = calloc (strlen (input) + 32, 1);
 				if (!s) {
 					goto beach;
 				}

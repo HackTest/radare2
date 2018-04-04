@@ -292,6 +292,7 @@ R_API RPrint* r_print_new() {
 		R_PRINT_FLAGS_OFFSET |
 		R_PRINT_FLAGS_HEADER |
 		R_PRINT_FLAGS_ADDRMOD;
+	p->seggrn = 4;
 	p->zoom = R_NEW0 (RPrintZoom);
 	p->reg = NULL;
 	p->get_register = NULL;
@@ -314,6 +315,7 @@ R_API RPrint* r_print_free(RPrint *p) {
 	}
 	sdb_free (p->formats);
 	p->formats = NULL;
+	R_FREE (p->strconv_mode);
 	if (p->zoom) {
 		free (p->zoom->buf);
 		free (p->zoom);
@@ -380,7 +382,7 @@ R_API void r_print_addr(RPrint *p, ut64 addr) {
 	if (use_segoff) {
 		ut32 s, a;
 		a = addr & 0xffff;
-		s = (addr - a) >> 4;
+		s = (addr - a) >> p->seggrn;
 		if (dec) {
 			snprintf (space, sizeof (space), "%d:%d", s & 0xffff, a & 0xffff);
 			white = r_str_pad (' ', 9 - strlen (space));
@@ -807,7 +809,7 @@ R_API void r_print_hexdump(RPrint *p, ut64 addr, const ut8 *buf, int len, int ba
 				if (use_segoff) {
 					ut32 s, a;
 					a = addr & 0xffff;
-					s = ((addr - a) >> 4) & 0xffff;
+					s = ((addr - a) >> p->seggrn) & 0xffff;
 					snprintf (soff, sizeof (soff), "%04x:%04x ", s, a);
 					printfmt ("- offset -");
 				} else {
@@ -1619,6 +1621,10 @@ static bool issymbol(char c) {
 	}
 }
 
+static bool ishexprefix(char *p) {
+	return (p[0] == '0' && p[1] == 'x');
+}
+
 R_API char* r_print_colorize_opcode(RPrint *print, char *p, const char *reg, const char *num, bool partial_reset) {
 	int i, j, k, is_mod, is_float = 0, is_arg = 0;
 	char *reset = partial_reset ? Color_NOBGRESET:Color_RESET;
@@ -1641,7 +1647,7 @@ R_API char* r_print_colorize_opcode(RPrint *print, char *p, const char *reg, con
 	memset (o, 0, COLORIZE_BUFSIZE);
 	for (i = j = 0; p[i]; i++, j++) {
 		/* colorize numbers */
-		if ((p[i] == '0' && p[i+1] == 'x') || (isdigit (p[i]) && issymbol (previous))) {
+		if ((ishexprefix (&p[i]) && previous != ':') || (isdigit (p[i]) && issymbol (previous))) {
 			int nlen = strlen (num);
 			if (nlen + j >= sizeof (o)) {
 				eprintf ("Colorize buffer is too small\n");

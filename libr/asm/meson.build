@@ -57,7 +57,6 @@ files = [
   'p/asm_x86_cs.c',
   'p/asm_x86_nasm.c',
   'p/asm_x86_nz.c',
-  'p/asm_x86_udis.c',
   'p/asm_xap.c',
   'p/asm_xcore_cs.c',
   'p/asm_xtensa.c',
@@ -168,5 +167,18 @@ r_asm = library('r_asm', files,
     r_util, r_syscall, r_parse, r_lang, r_flag, r_socket, libr_shlr
   ],
   install: true,
-  implicit_include_directories: false
+  implicit_include_directories: false,
+  soversion: r2version
+)
+
+pkgconfig_mod.generate(
+  libraries: [r_asm],
+  subdirs: 'libr',
+  version: r2version,
+  name: 'r_asm',
+  filebase: 'r_asm',
+  requires: [
+    'r_util', 'r_syscall', 'r_parse', 'r_lang', 'r_flag', 'r_socket'
+  ],
+  description: 'radare foundation libraries'
 )

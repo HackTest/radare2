@@ -328,7 +328,13 @@ static int cond_x862r2(int id) {
 	return 0;
 }
 
-static void anop_esil (RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len, csh *handle, cs_insn *insn) {
+/* reg indices are based on Intel doc for 32-bit ModR/M byte */
+static const char *reg32_to_name(ut8 reg) {
+	const char * const names[] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+	return reg < R_ARRAY_SIZE (names) ? names[reg] : "unk";
+}
+
+static void anop_esil(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len, csh *handle, cs_insn *insn) {
 	int rs = a->bits/8;
 	const char *pc = (a->bits==16)?"ip":
 		(a->bits==32)?"eip":"rip";
@@ -1109,6 +1115,22 @@ static void anop_esil (RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len
 		break;
 	case X86_INS_CALL:
 		{
+			if (a->read_at && a->bits != 16) {
+				ut8 thunk[4] = {0};
+				if (a->read_at (a, (ut64)INSOP (0).imm, thunk, sizeof (thunk))) {
+					/* 8b xx x4    mov <reg>, dword [esp]
+					   c3          ret
+					*/
+					if (thunk[0] == 0x8b && thunk[3] == 0xc3
+					    && (thunk[1] & 0xc7) == 4        /* 00rrr100 */
+					    && (thunk[2] & 0x3f) == 0x24) {  /* --100100: ignore scale in SIB byte */
+						ut8 reg = (thunk[1] & 0x38) >> 3;
+						esilprintf (op, "0x%"PFMT64x",%s,=", addr + op->size,
+						            reg32_to_name (reg));
+						break;
+					}
+				}
+			}
 			arg0 = getarg (&gop, 0, 0, NULL, ARG0_AR);
 			esilprintf (op,
 					"%s,%s,"
@@ -1364,7 +1386,23 @@ static void anop_esil (RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len
 // http://www.tptp.cc/mirrors/siyobik.info/instruction/IDIV.html
 // Divides (signed) the value in the AX, DX:AX, or EDX:EAX registers (dividend) by the source operand (divisor) and stores the result in the AX (AH:AL), DX:AX, or EDX:EAX registers. The source operand can be a general-purpose register or a memory location. The action of this instruction depends on the operand size (dividend/divisor), as shown in the following table:
 // IDIV RBX    ==   RDX:RAX /= RBX
-				esilprintf (op, "%s,%s,/=", arg0, "rax");
+				if (arg0) {
+					int width = INSOP(0).size;
+					const char *r_quot = (width==1)?"al": (width==2)?"ax": (width==4)?"eax":"rax";
+					const char *r_rema = (width==1)?"ah": (width==2)?"dx": (width==4)?"edx":"rdx";
+					const char *r_nume = (width==1)?"ax": r_quot;
+
+					if ( width == 1 ) {
+						esilprintf(op, "0xffffff00,eflags,&=,%s,%s,%%,eflags,|=,%s,%s,/,%s,=,0xff,eflags,&,%s,=,0xffffff00,eflags,&=,2,eflags,|=",
+							arg0, r_nume, arg0, r_nume, r_quot, r_rema);
+					} else {
+						esilprintf (op, "%s,%s,%%,%s,=,%s,%s,/,%s,=",
+								arg0, r_nume, r_rema, arg0, r_nume, r_quot);
+					}
+				}
+				else {
+					/* should never happen */
+				}
 			} else {
 				esilprintf (op, "%s,%s,/,%s,=", arg2, arg1, arg0);
 			}
@@ -1399,7 +1437,23 @@ static void anop_esil (RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len
 				if (arg1) {
 					esilprintf (op, "%s,%s,*=", arg1, arg0);
 				} else {
-					esilprintf (op, "%s,%s,*=", arg0, "rax");
+					if (arg0) {
+						int width = INSOP(0).size;
+						const char *r_quot = (width==1)?"al": (width==2)?"ax": (width==4)?"eax":"rax";
+						const char *r_rema = (width==1)?"ah": (width==2)?"dx": (width==4)?"edx":"rdx";
+						const char *r_nume = (width==1)?"ax": r_quot;
+
+						if ( width == 1 ) {
+							esilprintf(op, "0xffffff00,eflags,&=,%s,%s,%%,eflags,|=,%s,%s,*,%s,=,0xff,eflags,&,%s,=,0xffffff00,eflags,&=,2,eflags,|=",
+								arg0, r_nume, arg0, r_nume, r_quot, r_rema);
+						} else {
+							esilprintf (op, "%d,%s,%s,*,>>,%s,=,%s,%s,*=",
+									width*8, arg0, r_nume, r_rema, arg0, r_nume);
+						}
+					}
+					else {
+						/* should never happen */
+					}
 				}
 			}
 		}
@@ -1408,16 +1462,17 @@ static void anop_esil (RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len
 		{
 			src = getarg (&gop, 0, 0, NULL, SRC_AR);
 			if (src) {
-				switch (src[0]) {
-				case 'r':
-					esilprintf (op, "%s,rax,*=", src);
-					break;
-				case 'e':
-					esilprintf (op, "%s,eax,*=", src);
-					break;
-				default:
-					esilprintf (op, "%s,al,*=", src);
-					break;
+				int width = INSOP(0).size;
+				const char *r_quot = (width==1)?"al": (width==2)?"ax": (width==4)?"eax":"rax";
+				const char *r_rema = (width==1)?"ah": (width==2)?"dx": (width==4)?"edx":"rdx";
+				const char *r_nume = (width==1)?"ax": r_quot;
+
+				if ( width == 1 ) {
+					esilprintf(op, "0xffffff00,eflags,&=,%s,%s,%%,eflags,|=,%s,%s,*,%s,=,0xff,eflags,&,%s,=,0xffffff00,eflags,&=,2,eflags,|=",
+						src, r_nume, src, r_nume, r_quot, r_rema);
+				} else {
+					esilprintf (op, "%d,%s,%s,*,>>,%s,=,%s,%s,*=",
+							width*8, src, r_nume, r_rema, src, r_nume);
 				}
 			} else {
 				/* should never happen */
@@ -1962,8 +2017,10 @@ static void anop(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len, csh 
 	case X86_INS_SHRX:
 		// TODO: Set CF: See case X86_INS_SAL for more details.
 		op->type = R_ANAL_OP_TYPE_SHR;
-		op->src[0] = r_anal_value_new ();
-		op->src[0]->imm = INSOP(1).imm;
+		op->val = INSOP(1).imm;
+		// XXX this should be op->imm
+		//op->src[0] = r_anal_value_new ();
+		//op->src[0]->imm = INSOP(1).imm;
 		break;
 	case X86_INS_CMP:
 	case X86_INS_CMPPD:
@@ -2220,7 +2277,7 @@ static void anop(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len, csh 
 				ut64 seg = INSOP(0).imm;
 				ut64 off = INSOP(1).imm;
 				op->ptr = INSOP (0).mem.disp;
-				op->jump = (seg << 4) + off;
+				op->jump = (seg << a->seggrn) + off;
 			} else {
 				op->jump = INSOP(0).imm;
 			}
@@ -2592,7 +2649,7 @@ static int analop(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len) {
 }
 
 #if 0
-static int x86_int_0x80 (RAnalEsil *esil, int interrupt) {
+static int x86_int_0x80(RAnalEsil *esil, int interrupt) {
 	int syscall;
 	ut64 eax, ebx, ecx, edx;
 	if (!esil || (interrupt != 0x80))
@@ -2626,14 +2683,14 @@ static int x86_int_0x80 (RAnalEsil *esil, int interrupt) {
 #endif
 
 #if 0
-static int esil_x86_cs_intr (RAnalEsil *esil, int intr) {
+static int esil_x86_cs_intr(RAnalEsil *esil, int intr) {
 	if (!esil) return false;
 	eprintf ("INTERRUPT 0x%02x HAPPENS\n", intr);
 	return true;
 }
 #endif
 
-static int esil_x86_cs_init (RAnalEsil *esil) {
+static int esil_x86_cs_init(RAnalEsil *esil) {
 	if (!esil) {
 		return false;
 	}
@@ -2644,7 +2701,13 @@ static int esil_x86_cs_init (RAnalEsil *esil) {
 	return true;
 }
 
-static int esil_x86_cs_fini (RAnalEsil *esil) {
+static int fini(void *p) {
+	cs_close (&handle);
+	handle = 0;
+	return true;
+}
+
+static int esil_x86_cs_fini(RAnalEsil *esil) {
 	return true;
 }
 
@@ -3051,6 +3114,7 @@ RAnalPlugin r_anal_plugin_x86_cs = {
 	.op = &analop,
 	.archinfo = archinfo,
 	.get_reg_profile = &get_reg_profile,
+	.fini = fini,
 	.esil_init = esil_x86_cs_init,
 	.esil_fini = esil_x86_cs_fini,
 //	.esil_intr = esil_x86_cs_intr,

@@ -1,5 +1,6 @@
-/* radare - LGPL - Copyright 2009-2017 - nibble, pancake */
+/* radare - LGPL - Copyright 2009-2018 - nibble, pancake */
 
+#include <assert.h>
 #include <stdio.h>
 #include <r_types.h>
 #include <r_util.h>
@@ -12,6 +13,39 @@
 static RBinInfo* info(RBinFile *bf);
 
 //TODO: implement r_bin_symbol_dup() and r_bin_symbol_free ?
+
+static int get_file_type(RBinFile *bf) {
+	struct Elf_(r_bin_elf_obj_t) *obj = bf->o->bin_obj;
+	char *type = Elf_(r_bin_elf_get_file_type (obj));
+	return type? ((!strncmp (type, "CORE", 4)) ? R_BIN_TYPE_CORE : R_BIN_TYPE_DEFAULT) : -1;
+}
+
+static RList *maps(RBinFile *bf) {
+	if (bf && bf->o) {
+		return Elf_(r_bin_elf_get_maps)(bf->o->bin_obj);
+	}
+	return NULL;
+}
+
+static char* regstate(RBinFile *bf) {
+	struct Elf_(r_bin_elf_obj_t) *obj = bf->o->bin_obj;
+	if (obj->ehdr.e_machine != EM_AARCH64 &&
+		obj->ehdr.e_machine != EM_ARM &&
+		obj->ehdr.e_machine != EM_386 &&
+		obj->ehdr.e_machine != EM_X86_64) {
+		eprintf ("Cannot retrieve regstate on: %s (not yet supported)\n",
+					Elf_(r_bin_elf_get_machine_name)(obj));
+		return NULL;
+	}
+
+	int len = 0;
+	ut8 *regs = Elf_(r_bin_elf_grab_regstate) (obj, &len);
+	char *hexregs = (regs && len > 0) ? r_hex_bin2strdup (regs, len) : NULL;
+
+	free (regs);
+	return hexregs;
+}
+
 static void setsymord(ELFOBJ* eobj, ut32 ord, RBinSymbol *ptr) {
 	if (!eobj->symbols_by_ord || ord >= eobj->symbols_by_ord_size) {
 		return;
@@ -42,33 +76,30 @@ static Sdb* get_sdb(RBinFile *bf) {
 	return NULL;
 }
 
+static void * load_buffer(RBinFile *bf, RBuffer *buf, ut64 loadaddr, Sdb *sdb) {
+	struct Elf_(r_bin_elf_obj_t) *res;
+	if (!buf) {
+		return NULL;
+	}
+	res = Elf_(r_bin_elf_new_buf) (buf, bf->rbin->verbose);
+	if (res) {
+		sdb_ns_set (sdb, "info", res->kv);
+	}
+	return res;
+}
+
 static void * load_bytes(RBinFile *bf, const ut8 *buf, ut64 sz, ut64 loadaddr, Sdb *sdb) {
 	struct Elf_(r_bin_elf_obj_t) *res;
-	char *elf_type;
-	RBuffer *tbuf;
-
 	if (!buf || !sz || sz == UT64_MAX) {
 		return NULL;
 	}
-	tbuf = r_buf_new ();
+	RBuffer *tbuf = r_buf_new ();
+	// NOOOEES must use io!
 	r_buf_set_bytes (tbuf, buf, sz);
 	res = Elf_(r_bin_elf_new_buf) (tbuf, bf->rbin->verbose);
 	if (res) {
 		sdb_ns_set (sdb, "info", res->kv);
 	}
-
-	elf_type = Elf_(r_bin_elf_get_file_type (res));
-	if (elf_type && !strncmp (elf_type, "CORE", 4)) {
-		int len = 0;
-		ut8 *regs = Elf_(r_bin_elf_grab_regstate)(res, &len);
-		if (regs && len > 0) {
-			char *hexregs = r_hex_bin2strdup (regs, len);
-			eprintf ("arw %s\n", hexregs);
-			free (hexregs);
-		}
-		free (regs);
-	}
-	free (elf_type);
 	r_buf_free (tbuf);
 	return res;
 }
@@ -178,9 +209,6 @@ static RList* sections(RBinFile *bf) {
 			}
 			if (R_BIN_ELF_SCN_IS_READABLE (section[i].flags)) {
 				ptr->srwx |= R_BIN_SCN_READABLE;
-				if (obj->ehdr.e_type == ET_REL) {
-					ptr->srwx |= R_BIN_SCN_MAP;
-				}
 			}
 			r_list_append (ret, ptr);
 		}
@@ -200,7 +228,7 @@ static RList* sections(RBinFile *bf) {
 			ptr->vsize = phdr[i].p_memsz;
 			ptr->paddr = phdr[i].p_offset;
 			ptr->vaddr = phdr[i].p_vaddr;
-			ptr->srwx = phdr[i].p_flags | R_BIN_SCN_MAP;
+			ptr->srwx = phdr[i].p_flags;
 			switch (phdr[i].p_type) {
 			case PT_DYNAMIC:
 				strncpy (ptr->name, "DYNAMIC", R_BIN_SIZEOF_STRINGS);
@@ -256,7 +284,7 @@ static RList* sections(RBinFile *bf) {
 			ptr->vaddr = 0x10000;
 			ptr->add = true;
 			ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_WRITABLE |
-				R_BIN_SCN_EXECUTABLE | R_BIN_SCN_MAP;
+				R_BIN_SCN_EXECUTABLE;
 			r_list_append (ret, ptr);
 		}
 	}
@@ -276,7 +304,7 @@ static RList* sections(RBinFile *bf) {
 		if (obj->ehdr.e_type == ET_REL) {
 			ptr->add = true;
 		}
-		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_WRITABLE | R_BIN_SCN_MAP;
+		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_WRITABLE;
 		r_list_append (ret, ptr);
 	}
 	return ret;
@@ -852,6 +880,26 @@ static void _patch_reloc (ut16 e_machine, RIOBind *iob, RBinElfReloc *rel, ut64 
 	}
 }
 
+static bool ht_insert_intu64(SdbHash* ht, int key, ut64 value) {
+	ut64 *mvalue = malloc (sizeof (ut64));
+	if (!mvalue) {
+		return false;
+	}
+
+	*mvalue = value;
+	return ht_insert (ht, sdb_fmt (-1, "%d", key), (void *)mvalue);
+}
+
+static ut64 ht_find_intu64(SdbHash* ht, int key, bool* found) {
+	ut64 *mvalue = (ut64 *)ht_find (ht, sdb_fmt (-1, "%d", key), found);
+	return *mvalue;
+}
+
+static void relocs_by_sym_free(HtKv *kv) {
+	free (kv->key);
+	free (kv->value);
+}
+
 static RList* patch_relocs(RBin *b) {
 	RList *ret = NULL;
 	RBinReloc *ptr = NULL;
@@ -859,10 +907,14 @@ static RList* patch_relocs(RBin *b) {
 	RBinObject *obj = NULL;
 	struct Elf_(r_bin_elf_obj_t) *bin = NULL;
 	RIOSection *g = NULL, *s = NULL;
+	SdbHash *relocs_by_sym;
 	SdbListIter *iter;
 	RBinElfReloc *relcs = NULL;
+	RBinInfo *info;
+	int cdsz;
 	int i;
-	ut64 n_off, n_vaddr, vaddr, size, sym_addr = 0, offset = 0;
+	ut64 n_off, n_vaddr, vaddr, size, offset = 0;
+
 	if (!b)
 		return NULL;
 	io = b->iob.io;
@@ -880,6 +932,10 @@ static RList* patch_relocs(RBin *b) {
 	   	eprintf ("Warning: run r2 with -e io.cache=true to fix relocations in disassembly\n");
 		return relocs (r_bin_cur (b));
 	}
+
+	info = obj ? obj->info: NULL;
+	cdsz = info? (info->bits == 64? 8: info->bits == 32? 4: info->bits == 16 ? 4: 0): 0;
+
 	ls_foreach (io->sections, iter, s) {
 		if (s->paddr > offset) {
 			offset = s->paddr;
@@ -893,7 +949,7 @@ static RList* patch_relocs(RBin *b) {
 	n_vaddr = g->vaddr + g->vsize;
 	//reserve at least that space
 	size = bin->reloc_num * 4;
-	if (!b->iob.section_add (io, n_off, n_vaddr, size, size, R_BIN_SCN_READABLE|R_BIN_SCN_MAP, ".got.r2", 0, io->desc->fd)) {
+	if (!b->iob.section_add (io, n_off, n_vaddr, size, size, R_BIN_SCN_READABLE, ".got.r2", 0, io->desc->fd)) {
 		return NULL;
 	}
 	if (!(relcs = Elf_(r_bin_elf_get_relocs) (bin))) {
@@ -903,11 +959,23 @@ static RList* patch_relocs(RBin *b) {
 		free (relcs);
 		return NULL;
 	}
+	if (!(relocs_by_sym = ht_new (NULL, relocs_by_sym_free, NULL))) {
+		r_list_free (ret);
+		free (relcs);
+		return NULL;
+	}
 	vaddr = n_vaddr;
 	for (i = 0; !relcs[i].last; i++) {
+		ut64 sym_addr = 0;
+
 		if (relcs[i].sym) {
 			if (relcs[i].sym < bin->imports_by_ord_size && bin->imports_by_ord[relcs[i].sym]) {
-				sym_addr = 0;
+				bool found;
+
+				sym_addr = ht_find_intu64(relocs_by_sym, relcs[i].sym, &found);
+				if (!found) {
+					sym_addr = 0;
+				}
 			} else if (relcs[i].sym < bin->symbols_by_ord_size && bin->symbols_by_ord[relcs[i].sym]) {
 				sym_addr = bin->symbols_by_ord[relcs[i].sym]->vaddr;
 			}
@@ -917,13 +985,17 @@ static RList* patch_relocs(RBin *b) {
 		if (!(ptr = reloc_convert (bin, &relcs[i], n_vaddr))) {
 			continue;
 		}
-		ptr->vaddr = sym_addr ? sym_addr : vaddr;
-		if (!sym_addr) {
-			vaddr += 4;
+
+		if (sym_addr) {
+			ptr->vaddr = sym_addr;
+		} else {
+			ptr->vaddr = vaddr;
+			ht_insert_intu64 (relocs_by_sym, relcs[i].sym, vaddr);
+			vaddr += cdsz;
 		}
 		r_list_append (ret, ptr);
-		sym_addr = 0;
 	}
+	ht_free (relocs_by_sym);
 	free (relcs);
 	return ret;
 }
@@ -1197,6 +1269,7 @@ RBinPlugin r_bin_plugin_elf = {
 	.get_sdb = &get_sdb,
 	.load = &load,
 	.load_bytes = &load_bytes,
+	.load_buffer = &load_buffer,
 	.destroy = &destroy,
 	.check_bytes = &check_bytes,
 	.baddr = &baddr,
@@ -1217,6 +1290,9 @@ RBinPlugin r_bin_plugin_elf = {
 	.dbginfo = &r_bin_dbginfo_elf,
 	.create = &create,
 	.write = &r_bin_write_elf,
+	.file_type = &get_file_type,
+	.regstate = &regstate,
+	.maps = &maps,
 };
 
 #ifndef CORELIB

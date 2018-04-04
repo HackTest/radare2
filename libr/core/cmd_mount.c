@@ -260,10 +260,18 @@ static int cmd_mount(void *data, const char *_input) {
 			return false;
 		}
 		input++;
-		if (input[0]==' ') {
+		if (input[0] == ' ') {
 			input++;
 		}
-		r_fs_prompt (core->fs, input);
+		r_cons_set_raw (false);
+		{
+			RFSShell shell = {
+				.set_prompt = r_line_set_prompt,
+				.readline = r_line_readline,
+				.hist_add = r_line_hist_add
+			};
+			r_fs_shell_prompt (&shell, core->fs, input);
+		}
 		break;
 	case 'y':
 		eprintf ("TODO\n");

@@ -980,6 +980,15 @@ static int cb_cfg_fortunes_type(void *user, void *data) {
 	return true;
 }
 
+static int cb_cmdpdc(void *user, void *data) {
+	RConfigNode *node = (RConfigNode *)data;
+	if (node->value[0] == '?') {
+		r_cons_printf ("pdc\n");
+		return false;
+	}
+	return true;
+}
+
 static int cb_cmdlog(void *user, void *data) {
 	RCore *core = (RCore *) user;
 	RConfigNode *node = (RConfigNode *) data;
@@ -1010,7 +1019,13 @@ static int cb_color(void *user, void *data) {
 	} else {
 		core->print->flags &= (~R_PRINT_FLAGS_COLOR);
 	}
-	r_cons_singleton ()->color = (node->i_value > COLOR_MODE_16M)? COLOR_MODE_16M: node->i_value;
+	if (!strcmp (node->value, "true")) {
+		node->i_value = 1;
+	} else if (!strcmp (node->value, "false")) {
+		node->i_value = 0;
+	}
+	r_cons_singleton ()->color = (node->i_value > COLOR_MODE_16M)
+		? COLOR_MODE_16M: node->i_value;
 	r_cons_pal_update_event ();
 	r_print_set_flags (core->print, core->print->flags);
 	return true;
@@ -1685,9 +1700,12 @@ static int cb_scrstrconv(void *user, void *data) {
 		if (strlen (node->value) > 1 && node->value[1] == '?') {
 			r_cons_printf ("Valid values for scr.strconv:\n"
 				"  asciiesc  convert to ascii with non-ascii chars escaped\n"
-				"  asciidot  convert to ascii with non-ascii chars turned into a dot (except some control chars)\n"
+				"  asciidot  convert to ascii with non-ascii chars turned into a dot (except control chars stated below)\n"
 				"\n"
-				"Ascii chars are in the range 0x20-0x7e.\n");
+				"Ascii chars are in the range 0x20-0x7e. Always escaped control chars are alert (\\a),\n"
+				"backspace (\\b), formfeed (\\f), newline (\\n), carriage return (\\r), horizontal tab (\\t)\n"
+				"and vertical tab (\\v). Also, double quotes (\\\") are always escaped, but backslashes (\\\\)\n"
+				"are only escaped if str.escbslash = true.\n");
 		} else {
 			print_node_options (node);
 		}
@@ -1783,6 +1801,16 @@ static int cb_segoff(void *user, void *data) {
 	}
 	return true;
 }
+
+static int cb_seggrn(void *user, void *data) {
+	RCore *core = (RCore *) user;
+	RConfigNode *node = (RConfigNode *) data;
+	core->assembler->seggrn = node->i_value;
+	core->anal->seggrn = node->i_value;
+	core->print->seggrn = node->i_value;
+	return true;
+}
+
 
 static int cb_stopthreads(void *user, void *data) {
 	RCore *core = (RCore *) user;
@@ -2111,6 +2139,28 @@ static int cb_anal_bb_max_size(void *user, void *data) {
 	return true;
 }
 
+static int cb_anal_cpp_abi(void *user, void *data) {
+	RCore *core = (RCore*) user;
+	RConfigNode *node = (RConfigNode*) data;
+
+	if (*node->value == '?') {
+		print_node_options (node);
+		return false;
+	}
+
+	if (*node->value) {
+		if (strcmp (node->value, "itanium") == 0) {
+			core->anal->cpp_abi = R_ANAL_CPP_ABI_ITANIUM;
+			return true;
+		} else if (strcmp (node->value, "msvc") == 0) {
+			core->anal->cpp_abi = R_ANAL_CPP_ABI_MSVC;
+			return true;
+		}
+		eprintf ("anal.cpp.abi: cannot find '%s'\n", node->value);
+	}
+	return false;
+}
+
 static int cb_linesto(void *user, void *data) {
 	RCore *core = (RCore*) user;
 	RConfigNode *node = (RConfigNode*) data;
@@ -2293,6 +2343,10 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("anal.bb.maxsize", "1024", &cb_anal_bb_max_size, "Maximum basic block size");
 	SETCB ("anal.pushret", "false", &cb_anal_pushret, "Analyze push+ret as jmp");
 
+	n = NODECB ("anal.cpp.abi", "itanium", &cb_anal_cpp_abi);
+	SETDESC (n, "Select C++ ABI (Compiler)");
+	SETOPTIONS (n, "itanium", "msvc", NULL);
+
 #if __linux__ && __GNU_LIBRARY__ && __GLIBC__ && __GLIBC_MINOR__
  	SETCB("dbg.malloc", "glibc", &cb_malloc, "Choose malloc structure parser");
 #else
@@ -2307,6 +2361,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETI ("esil.stack.size", 0xf0000, "Number of elements that can be pushed on the esilstack");
 	SETI ("esil.stack.addr", 0x100000, "Number of elements that can be pushed on the esilstack");
 	SETPREF ("esil.stack.pattern", "0", "Specify fill pattern to initialize the stack (0, w, d, i)");
+	SETI ("esil.addr.size", 64, "Maximum address size in accessed by the ESIL VM");
 
 	/* asm */
 	//asm.os needs to be first, since other asm.* depend on it
@@ -2329,7 +2384,6 @@ R_API int r_core_config_init(RCore *core) {
 	SETICB ("asm.pcalign", 0, &cb_asm_pcalign, "Only recognize as valid instructions aligned to this value");
 	SETPREF ("asm.calls", "true", "Show callee function related info as comments in disasm");
 	SETPREF ("asm.bbline", "false", "Show empty line after every basic block");
-	SETPREF ("asm.bbinfo", "false", "Show basic block information");
 	SETPREF ("asm.comments", "true", "Show comments in disassembly view");
 	SETPREF ("asm.jmphints", "true", "Show jump hints [numbers] in disasm");
 	SETPREF ("asm.jmpsub", "false", "Always substitute jump, call and branch targets in disassembly");
@@ -2416,6 +2470,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("asm.parser", "x86.pseudo", &cb_asmparser, "Set the asm parser to use");
 	SETCB ("asm.segoff", "false", &cb_segoff, "Show segmented address in prompt (x86-16)");
 	SETCB ("asm.decoff", "false", &cb_decoff, "Show segmented address in prompt (x86-16)");
+	SETICB ("asm.seggrn", 4, &cb_seggrn, "Segment granularity in bits (x86-16)");
 	n = NODECB ("asm.syntax", "intel", &cb_asmsyntax);
 	SETDESC (n, "Select assembly syntax");
 	SETOPTIONS (n, "att", "intel", "masm", "jz", "regnum", NULL);
@@ -2638,6 +2693,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETPREF ("cmd.gprompt", "", "Graph visual prompt commands");
 	SETPREF ("cmd.hit", "", "Run when a search hit is found");
 	SETPREF ("cmd.open", "", "Run when file is opened");
+	SETCB ("cmd.pdc", "", &cb_cmdpdc, "Select pseudo-decompiler command to run after pdc");
 	SETCB ("cmd.log", "", &cb_cmdlog, "Every time a new T log is added run this command");
 	SETPREF ("cmd.prompt", "", "Prompt commands");
 	SETCB ("cmd.repeat", "false", &cb_cmdrepeat, "Empty command an alias for '..' (repeat last command)");
@@ -2821,7 +2877,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETOPTIONS (n, "asciiesc", "asciidot", NULL);
 
 	/* str */
-	SETCB ("str.escbslash", "false", &cb_str_escbslash, "Escape the backslash (iz and Cs-based output only)");
+	SETCB ("str.escbslash", "false", &cb_str_escbslash, "Escape the backslash");
 
 	/* search */
 	SETCB ("search.contiguous", "true", &cb_contiguous, "Accept contiguous/adjacent search hits");

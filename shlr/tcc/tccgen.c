@@ -1438,6 +1438,7 @@ the_end:
 		}
 	}
 	type->t = t;
+
 	return type_found;
 }
 
@@ -2056,22 +2057,23 @@ tok_identifier:
 		}
 		if (!s) {
 			tcc_error ("invalid declaration '%s'", get_tok_str (t, NULL));
-		}
-		if ((s->type.t & (VT_STATIC | VT_INLINE | VT_BTYPE)) ==
-		    (VT_STATIC | VT_INLINE | VT_FUNC)) {
-			/* if referencing an inline function, then we generate a
-			   symbol to it if not already done. It will have the
-			   effect to generate code for it at the end of the
-			   compilation unit. */
-			r = VT_SYM | VT_CONST;
 		} else {
-			r = s->r;
-		}
-		vset (&s->type, r, s->c);
-		/* if forward reference, we must point to s */
-		if (vtop->r & VT_SYM) {
-			vtop->sym = s;
-			vtop->c.ul = 0;
+			if ((s->type.t & (VT_STATIC | VT_INLINE | VT_BTYPE)) ==
+			    (VT_STATIC | VT_INLINE | VT_FUNC)) {
+				/* if referencing an inline function, then we generate a
+				   symbol to it if not already done. It will have the
+				   effect to generate code for it at the end of the
+				   compilation unit. */
+				r = VT_SYM | VT_CONST;
+			} else {
+				r = s->r;
+			}
+			vset (&s->type, r, s->c);
+			/* if forward reference, we must point to s */
+			if (vtop->r & VT_SYM) {
+				vtop->sym = s;
+				vtop->c.ul = 0;
+			}
 		}
 		break;
 	}
@@ -3015,8 +3017,8 @@ found:
 static int decl0(int l, int is_for_loop_init)
 {
 	int v, has_init, r;
-	CType type, btype;
-	Sym *sym;
+	CType type = {.t = 0, .ref = NULL}, btype = {.t = 0, .ref = NULL};
+	Sym *sym = NULL;
 	AttributeDef ad;
 
 	for (;;) {
@@ -3097,10 +3099,14 @@ static int decl0(int l, int is_for_loop_init)
 
 				/* reject abstract declarators in function definition */
 				sym = type.ref;
-				while ((sym = sym->next) != NULL)
-					if (!(sym->v & ~SYM_FIELD)) {
-						expect ("identifier");
-					}
+				if (sym) {
+					while ((sym = sym->next) != NULL)
+						if (!(sym->v & ~SYM_FIELD)) {
+							expect ("identifier");
+						}
+				} else {
+					return 0; // XXX unmatching braces in typedef?
+				}
 
 				/* XXX: cannot do better now: convert extern line to static inline */
 				if ((type.t & (VT_EXTERN | VT_INLINE)) == (VT_EXTERN | VT_INLINE)) {
@@ -3147,8 +3153,19 @@ func_error1:
 				if (btype.t & VT_TYPEDEF) {
 					/* save typedefed type  */
 					/* XXX: test storage specifiers ? */
+					if (tok != ';') {
+						v = tok;
+						next();
+					}
 					sym = sym_push (v, &type, INT_ATTR (&ad), 0);
 					sym->type.t |= VT_TYPEDEF;
+					/* Provide SDB with typedefs' info */
+					const char *alias = NULL;
+					char buf[500];
+					alias = get_tok_str(v, NULL);
+					type_to_str(buf, sizeof(buf), &sym->type, NULL);
+					tcc_appendf("%s=typedef\n",alias);
+					tcc_appendf("typedef.%s=%s\n",alias, buf);
 				} else {
 					r = 0;
 					if ((type.t & VT_BTYPE) == VT_FUNC) {

@@ -74,7 +74,6 @@ typedef struct r_asm_op_t {
 	char buf_asm[R_ASM_BUFSIZE + 1];
 	char buf_hex[R_ASM_BUFSIZE + 1];
 	RBuffer *buf_inc;
-
 } RAsmOp;
 
 typedef struct r_asm_code_t {
@@ -118,6 +117,7 @@ typedef struct r_asm_t {
 	int bitshift;
 	bool immdisp; // Display immediates with # symbol (for arm stuff).
 	SdbHash *flags;
+	int seggrn;
 } RAsm;
 
 typedef int (*RAsmModifyCallback)(RAsm *a, ut8 *buf, int field, ut64 val);

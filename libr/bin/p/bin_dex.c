@@ -1089,10 +1089,10 @@ static const ut8 *parse_dex_class_method(RBinFile *binfile, RBinDexObj *bin,
 	int i, left;
 	ut64 omi = 0;
 	bool catchAll;
-	ut16 regsz, ins_size, outs_size, tries_size;
-	ut16 handler_off, start_addr, insn_count;
-	ut32 debug_info_off, insns_size;
-	const ut8 *encoded_method_addr;
+	ut16 regsz = 0, ins_size = 0, outs_size = 0, tries_size = 0;
+	ut16 handler_off, start_addr, insn_count = 0;
+	ut32 debug_info_off = 0, insns_size = 0;
+	const ut8 *encoded_method_addr = NULL;
 
 	if (DM > 4096) {
 		eprintf ("This DEX is probably corrupted. Chopping DM from %d to 4KB\n", (int)DM);
@@ -1128,7 +1128,7 @@ static const ut8 *parse_dex_class_method(RBinFile *binfile, RBinDexObj *bin,
 		// TODO: check size
 		// ut64 prolog_size = 2 + 2 + 2 + 2 + 4 + 4;
 		ut64 v2, handler_type, handler_addr;
-		int t;
+		int t = 0;
 		if (MC > 0) {
 			// TODO: parse debug info
 			// XXX why binfile->buf->base???
@@ -1902,7 +1902,7 @@ static RList *sections(RBinFile *bf) {
 		strcpy (ptr->name, "header");
 		ptr->size = ptr->vsize = sizeof (struct dex_header_t);
 		ptr->paddr= ptr->vaddr = 0;
-		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_MAP;
+		ptr->srwx = R_BIN_SCN_READABLE;
 		ptr->add = true;
 		r_list_append (ret, ptr);
 	}
@@ -1912,7 +1912,7 @@ static RList *sections(RBinFile *bf) {
 		ptr->paddr= ptr->vaddr = sizeof (struct dex_header_t);
 		ptr->size = bin->code_from - ptr->vaddr; // fix size
 		ptr->vsize = ptr->size;
-		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_MAP;
+		ptr->srwx = R_BIN_SCN_READABLE;
 		ptr->add = true;
 		r_list_append (ret, ptr);
 	}
@@ -1921,7 +1921,7 @@ static RList *sections(RBinFile *bf) {
 		ptr->vaddr = ptr->paddr = bin->code_from; //ptr->vaddr = fsym;
 		ptr->size = bin->code_to - ptr->paddr;
 		ptr->vsize = ptr->size;
-		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_EXECUTABLE | R_BIN_SCN_MAP;
+		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_EXECUTABLE;
 		ptr->add = true;
 		r_list_append (ret, ptr);
 	}
@@ -1937,7 +1937,7 @@ static RList *sections(RBinFile *bf) {
 			// hacky workaround
 			//ptr->size = ptr->vsize = 1024;
 		}
-		ptr->srwx = R_BIN_SCN_READABLE | R_BIN_SCN_MAP; //|2;
+		ptr->srwx = R_BIN_SCN_READABLE; //|2;
 		ptr->add = true;
 		r_list_append (ret, ptr);
 	}

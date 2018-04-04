@@ -4,6 +4,7 @@
 # 'iconv.c',
 
 files = [
+  'ascii_table.c',
   'base85.c',
   'base91.c',
   'bdiff.c',
@@ -63,6 +64,7 @@ files = [
   'thread_pipe.c',
   'tinyrange.c',
   'tree.c',
+  'trie.c',
   'r_json.c',
   'ubase64.c',
   'uleb128.c',
@@ -88,5 +90,15 @@ r_util = library('r_util', files,
   dependencies: [ldl, pth, utl],
   link_with: [libr_shlr],
   install: true,
-  implicit_include_directories: false
+  implicit_include_directories: false,
+  soversion: r2version
+)
+
+pkgconfig_mod.generate(
+  libraries: [r_util],
+  subdirs: 'libr',
+  version: r2version,
+  name: 'r_util',
+  filebase: 'r_util',
+  description: 'radare foundation libraries'
 )

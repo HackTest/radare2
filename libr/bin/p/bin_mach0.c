@@ -34,17 +34,28 @@ static char *entitlements(RBinFile *bf, bool json) {
 
 static void * load_bytes(RBinFile *bf, const ut8 *buf, ut64 sz, ut64 loadaddr, Sdb *sdb){
 	struct MACH0_(obj_t) *res = NULL;
-	RBuffer *tbuf = NULL;
 	if (!buf || !sz || sz == UT64_MAX) {
 		return NULL;
 	}
-	tbuf = r_buf_new ();
+	RBuffer *tbuf = r_buf_new ();
 	r_buf_set_bytes (tbuf, buf, sz);
 	res = MACH0_(new_buf) (tbuf, bf->rbin->verbose);
 	if (res) {
 		sdb_ns_set (sdb, "info", res->kv);
 	}
 	r_buf_free (tbuf);
+	return res;
+}
+
+static void * load_buffer(RBinFile *bf, RBuffer *buf, ut64 loadaddr, Sdb *sdb){
+	struct MACH0_(obj_t) *res = NULL;
+	if (!buf) {
+		return NULL;
+	}
+	res = MACH0_(new_buf) (buf, bf->rbin->verbose);
+	if (res) {
+		sdb_ns_set (sdb, "info", res->kv);
+	}
 	return res;
 }
 
@@ -131,7 +142,7 @@ static RList* sections(RBinFile *bf) {
 		if (!ptr->vaddr) {
 			ptr->vaddr = ptr->paddr;
 		}
-		ptr->srwx = sections[i].srwx | R_BIN_SCN_MAP;
+		ptr->srwx = sections[i].srwx;
 		r_list_append (ret, ptr);
 	}
 	free (sections);
@@ -839,6 +850,7 @@ RBinPlugin r_bin_plugin_mach0 = {
 	.get_sdb = &get_sdb,
 	.load = &load,
 	.load_bytes = &load_bytes,
+	.load_buffer = &load_buffer,
 	.destroy = &destroy,
 	.check_bytes = &check_bytes,
 	.baddr = &baddr,

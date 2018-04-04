@@ -215,13 +215,10 @@ static int v850_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *buf, int len)
 		op->type = R_ANAL_OP_TYPE_ADD;
 		if (F6_REG2(word1) == V850_SP) {
 			op->stackop = R_ANAL_STACK_INC;
-			// Not so sure about the fix but
-			// F6_IMM works only for 32 bit words.
-			// word1 is 16 bits long.
-			op->stackptr = F2_IMM (word1);
+			op->stackptr = (st64) word2;
 			op->val = op->stackptr;
 		}
-		r_strbuf_appendf (&op->esil, "%hd,%s,+,%s,=", word2, F6_RN1 (word1), F6_RN2 (word1));
+		r_strbuf_appendf (&op->esil, "%d,%s,+,%s,=", (st32) word2, F6_RN1 (word1), F6_RN2 (word1));
 		update_flags (op, -1);
 		break;
 	case V850_SHR_IMM5:
@@ -244,7 +241,6 @@ static int v850_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *buf, int len)
 		update_flags (op, V850_FLAG_CY | V850_FLAG_S | V850_FLAG_Z);
 		clear_flags (op, V850_FLAG_OV);
 		break;
-
 	case V850_BCOND:
 	case V850_BCOND2:
 	case V850_BCOND3:

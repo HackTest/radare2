@@ -76,7 +76,7 @@ R_API RList *r_core_asm_strsearch(RCore *core, const char *input, ut64 from, ut6
 	int matches = 0;
 	const int addrbytes = core->io->addrbytes;
 
-	if (!*input) {
+	if (!input || !*input) {
 		return NULL;
 	}
 	if (core->blocksize <= OPSZ) {
@@ -120,7 +120,7 @@ R_API RList *r_core_asm_strsearch(RCore *core, const char *input, ut64 from, ut6
 			r_asm_set_pc (core->assembler, addr);
 			if (mode == 'e') {
 				RAnalOp analop = {0};
-				if (r_anal_op (core->anal, &analop, addr, buf + idx, 15) < 1) {
+				if (r_anal_op (core->anal, &analop, addr, buf + idx, 15, R_ANAL_OP_MASK_ALL) < 1) {
 					idx ++; // TODO: honor mininstrsz
 					continue;
 				}
@@ -145,7 +145,9 @@ R_API RList *r_core_asm_strsearch(RCore *core, const char *input, ut64 from, ut6
 					matches = strstr (opst, tokens[matchcount]) != NULL;
 				} else {
 					rx = r_regex_new (tokens[matchcount], "");
-					matches = r_regex_exec (rx, opst, 0, 0, 0) == 0;
+					if (r_regex_comp (rx, tokens[matchcount], R_REGEX_EXTENDED|R_REGEX_NOSUB) == 0) {
+						matches = r_regex_exec (rx, opst, 0, 0, 0) == 0;
+					}
 					r_regex_free (rx);
 				}
 			}

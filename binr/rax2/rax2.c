@@ -2,6 +2,7 @@
 
 #include "../blob/version.c"
 #include <r_print.h>
+#include <r_util.h>
 
 #define STDIN_BUFFER_SIZE 354096
 #define R_STATIC_ASSERT(x)\
@@ -72,6 +73,10 @@ static int format_output(char mode, const char *s) {
 	return true;
 }
 
+static void print_ascii_table() {
+	printf("%s", ret_ascii_table());
+}
+
 static int help() {
 	printf (
 		"  =[base]                      ;  rax2 =10 0x46 -> output in base 10\n"
@@ -94,6 +99,7 @@ static int help() {
 		"  raw     ->  hex              ;  rax2 -S < /binfile\n"
 		"  hex     ->  raw              ;  rax2 -s 414141\n"
 		"  -l                           ;  append newline to output (for -E/-D/-r/..\n"
+		"  -a      show ascii table     ;  rax2 -a\n"
 		"  -b      bin -> str           ;  rax2 -b 01000101 01110110\n"
 		"  -B      str -> bin           ;  rax2 -B hello\n"
 		"  -d      force integer        ;  rax2 -d 3 -> 3 instead of 0x3\n"
@@ -145,6 +151,7 @@ static int rax(char *str, int len, int last) {
 		while (str[1] && str[1] != ' ') {
 			switch (str[1]) {
 			case 'l': nl = "\n"; break;
+			case 'a': print_ascii_table (); return 0;
 			case 's': flags ^= 1; break;
 			case 'e': flags ^= 1 << 1; break;
 			case 'S': flags ^= 1 << 2; break;
@@ -514,7 +521,7 @@ static int use_stdin() {
 			}
 			buf[n] = 0;
 			// if (sflag && strlen (buf) < STDIN_BUFFER_SIZE) // -S
-			buf[STDIN_BUFFER_SIZE] = '\0'; 
+			buf[STDIN_BUFFER_SIZE] = '\0';
 			if (!rax (buf, l, 0)) {
 				break;
 			}

@@ -19,5 +19,18 @@ r_hash = library('r_hash', files,
   dependencies: [mth],
   link_with: [r_util],
   install: true,
-  implicit_include_directories: false
+  implicit_include_directories: false,
+  soversion: r2version
+)
+
+pkgconfig_mod.generate(
+  libraries: [r_hash],
+  subdirs: 'libr',
+  version: r2version,
+  name: 'r_hash',
+  filebase: 'r_hash',
+  requires: [
+    'r_util'
+  ],
+  description: 'radare foundation libraries'
 )

@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2009-2017 - nibble, pancake */
+/* radare - LGPL - Copyright 2009-2018 - nibble, pancake */
 #if 0
 * Use RList
 * Support callback for null command (why?)
@@ -241,6 +241,7 @@ static const char *help_msg_u[] = {
 	"u", "", "show system uname",
 	"uw", "", "alias for wc (requires: e io.cache=true)",
 	"us", "", "alias for s- (seek history)",
+	"uc", "", "undo core commands (uc?, ucl, uc*, ..)",
 	NULL
 };
 
@@ -345,9 +346,51 @@ R_API RAsmOp *r_core_disassemble (RCore *core, ut64 addr) {
 }
 
 static int cmd_uname(void *data, const char *input) {
+	RCore *core = data;
 	switch (input[0]) {
 	case '?': // "u?"
 		r_core_cmd_help (data, help_msg_u);
+		return 1;
+	case 'c': // "uc"
+		switch (input[1]) {
+		case ' ': {
+			char *cmd = strdup (input + 2);
+			char *rcmd = strchr (cmd, ',');
+			if (rcmd) {
+				*rcmd++ = 0;
+				RCoreUndo *undo = r_core_undo_new (core->offset, cmd, rcmd);
+				r_core_undo_push (core, undo);
+			} else {
+				eprintf ("Usage: uc [cmd] [revert-cmd]");
+			}
+			free (cmd);
+			}
+			break;
+		case '?':
+			eprintf ("Usage: uc [cmd],[revert-cmd]\n");
+			eprintf (" uc. - list all reverts in current\n");
+			eprintf (" uc* - list all core undos\n");
+			eprintf (" uc  - list all core undos\n");
+			eprintf (" uc- - undo last action\n");
+			break;
+		case '.': {
+			RCoreUndoCondition cond = {
+				.addr = core->offset,
+				.minstamp = 0,
+				.glob = NULL
+			};
+			r_core_undo_print (core, 1, &cond);
+			} break;
+		case '*':
+			r_core_undo_print (core, 1, NULL);
+			break;
+		case '-':
+			r_core_undo_pop (core);
+			break;
+		default:
+			r_core_undo_print (core, 0, NULL);
+			break;
+		}
 		return 1;
 	case 's': // "us"
 		r_core_cmdf (data, "s-%s", input + 1);
@@ -1600,6 +1643,7 @@ static int r_core_cmd_subst(RCore *core, char *cmd) {
 	char *cmt, *colon = NULL, *icmd = strdup (cmd);
 	const char *cmdrep = NULL;
 	bool tmpseek = false;
+	bool original_tmpseek = core->tmpseek;
 	ut64 orig_offset;
 
 	cmd = r_str_trim_head_tail (icmd);
@@ -1700,6 +1744,7 @@ static int r_core_cmd_subst(RCore *core, char *cmd) {
 	}
 	if (tmpseek) {
 		r_core_seek (core, orig_offset, 1);
+		core->tmpseek = original_tmpseek;
 	}
 	if (core->print) {
 		core->print->cur_enabled = ocur_enabled;
@@ -1742,6 +1787,28 @@ static void tmpenvs_free(void *item) {
 	free (item);
 }
 
+static bool set_tmp_arch(RCore *core, char *arch, char **tmparch) {
+	if (tmparch == NULL ) {
+		eprintf ("tmparch should be set\n");
+	}
+
+	*tmparch = strdup (r_config_get (core->config, "asm.arch"));
+	r_config_set (core->config, "asm.arch", arch);
+	core->fixedarch = true;
+	return true;
+}
+
+static bool set_tmp_bits(RCore *core, int bits, char **tmpbits) {
+	if (tmpbits == NULL) {
+		eprintf ("tmpbits should be set\n");
+	}
+
+	*tmpbits = strdup (r_config_get (core->config, "asm.bits"));
+	r_config_set_i (core->config, "asm.bits", bits);
+	core->fixedbits = true;
+	return true;
+}
+
 static int r_core_cmd_subst_i(RCore *core, char *cmd, char *colon) {
 	RList *tmpenvs = r_list_newf (tmpenvs_free);
 	const char *quotestr = "`";
@@ -1755,6 +1822,8 @@ static int r_core_cmd_subst_i(RCore *core, char *cmd, char *colon) {
 	int scr_color = -1;
 	bool eos = false;
 	bool haveQuote = false;
+	bool oldfixedarch = core->fixedarch;
+	bool oldfixedbits = core->fixedbits;
 
 	if (!cmd) {
 		return 0;
@@ -1892,6 +1961,11 @@ static int r_core_cmd_subst_i(RCore *core, char *cmd, char *colon) {
 			return r_cmd_call (core->rcmd, cmd);
 		}
 		break;
+	case '?':
+		if (cmd[1] == '>') {
+			r_core_cmd_help (core, help_msg_greater_sign);
+			return true;
+		}
 	}
 
 // TODO must honor `
@@ -1940,9 +2014,10 @@ static int r_core_cmd_subst_i(RCore *core, char *cmd, char *colon) {
 					eprintf (" pd|H   - enable scr.html, respect scr.color\n");
 					eprintf (" pi 1|T - use scr.tts to speak out the stdout\n");
 					return ret;
-				} else if (!strcmp (ptr + 1, "H")) { // "|H"
+				} else if (!strncmp (ptr + 1, "H", 1)) { // "|H"
 					scr_html = r_config_get_i (core->config, "scr.html");
 					r_config_set_i (core->config, "scr.html", true);
+					//r_config_set_i (core->config, "scr.pipecolor", true);
 				} else if (!strcmp (ptr + 1, "T")) { // "|T"
 					scr_color = r_config_get_i (core->config, "scr.color");
 					r_config_set_i (core->config, "scr.color", COLOR_MODE_DISABLED);
@@ -1975,7 +2050,7 @@ static int r_core_cmd_subst_i(RCore *core, char *cmd, char *colon) {
 	/* bool conditions */
 	ptr = (char *)r_str_lastbut (cmd, '&', quotestr);
 	//ptr = strchr (cmd, '&');
-	while (ptr && ptr[1] == '&') {
+	while (ptr && *ptr && ptr[1] == '&') {
 		*ptr = '\0';
 		ret = r_cmd_call (core->rcmd, cmd);
 		if (ret == -1) {
@@ -2087,6 +2162,10 @@ next:
 	ptr = (char *)r_str_firstbut (cmd, '>', "\"");
 	// TODO honor `
 	if (ptr) {
+		if (ptr[0] && ptr[1] == '?') {
+			r_core_cmd_help (core, help_msg_greater_sign);
+			return true;
+		}
 		int fdn = 1;
 		int pipecolor = r_config_get_i (core->config, "scr.pipecolor");
 		int use_editor = false;
@@ -2231,7 +2310,7 @@ next2:
 		ptr = NULL;
 	}
 
-	core->tmpseek = ptr? true: false;
+	core->tmpseek = ptr ? true: false;
 	int rc = 0;
 	if (ptr) {
 		char *f, *ptr2 = strchr (ptr + 1, '!');
@@ -2240,6 +2319,8 @@ next2:
 		char *tmpbits = NULL;
 		const char *offstr = NULL;
 		ut64 tmpbsz = core->blocksize;
+		bool is_bits_set = false;
+		bool is_arch_set = false;
 		char *tmpeval = NULL;
 		char *tmpasm = NULL;
 		int flgspc = -123;
@@ -2293,7 +2374,6 @@ repeat_arroba:
 				eprintf ("TODO: what do you expect for @. import offset from file maybe?\n");
 			}
 		} else if (ptr[0] && ptr[1] == ':' && ptr[2]) {
-			usemyblock = true;
 			switch (ptr[0]) {
 			case 'F': // "@F:" // temporary flag space
 				flgspc = r_flag_space_get (core->flags, ptr + 2);
@@ -2302,34 +2382,25 @@ repeat_arroba:
 			case 'B': // "@B:#" // seek to the last instruction in current bb
 				{
 					int index = (int)r_num_math (core->num, ptr + 2);
-					// XXX this is slow, can be optimized to just retreive the bb we want
-					RListIter *iter;
-					RAnalBlock *bb;
-					RAnalFunction *fcn = r_anal_get_fcn_in (core->anal, core->offset, 0);
-					if (fcn) {
-						r_list_foreach (fcn->bbs, iter, bb) {
-							if ((core->offset >= bb->addr) && (core->offset < (bb->addr + bb->size))) {
-								int count = bb->op_pos_size / sizeof (bb->op_pos[0]);
-								int pos = (index < 0) ? count + index + 1: index;
-								if (pos < 0) {
-									pos = 0;
-								}
-								if (pos > count) {
-									pos = count;
-								}
-								int lastOp = bb->op_pos[pos];
-								for (i = 0; i < count; i++) {
-									eprintf ("%d 0x%llx %d\n", pos, core->offset + bb->op_pos[i], i);
-								}
-								r_core_seek (core, core->offset + lastOp, 1);
-								core->tmpseek = true;
-								goto fuji;
-								break;
-							}
+					RAnalBlock *bb = r_anal_bb_from_offset (core->anal, core->offset);
+					if (bb) {
+						// handle negative indices
+						if (index < 0) {
+							index = bb->ninstr + index;
+						}
+
+						if (index >= 0 && index < bb->ninstr) {
+							ut16 inst_off = r_anal_bb_offset_inst (bb, index);
+							r_core_seek (core, bb->addr + inst_off, 1);
+							core->tmpseek = true;
+							usemyblock = true;
+						} else {
+							eprintf("The current basic block has %d instructions\n", bb->ninstr);
 						}
 					} else {
-						eprintf ("Cant find a function for 0x%08"PFMT64x"\n", core->offset);
+						eprintf ("Can't find a basic block for 0x%08"PFMT64x"\n", core->offset);
 					}
+					break;
 				}
 				break;
 			case 'f': // "@f:" // slurp file in block
@@ -2341,6 +2412,7 @@ repeat_arroba:
 						core->block = buf;
 						core->blocksize = sz;
 						memcpy (core->block, f, sz);
+						usemyblock = true;
 					} else {
 						eprintf ("cannot alloc %d", sz);
 					}
@@ -2367,18 +2439,18 @@ repeat_arroba:
 					}
 					r_core_seek (core, regval, 1);
 					free (mander);
+					usemyblock = true;
 				}
 				break;
 			case 'b': // "@b:" // bits
-				tmpbits = strdup (r_config_get (core->config, "asm.bits"));
-				r_config_set_i (core->config, "asm.bits",
-					r_num_math (core->num, ptr + 2));
+				is_bits_set = set_tmp_bits (core, r_num_math (core->num, ptr + 2), &tmpbits);
 				break;
 			case 'i': // "@i:"
 				{
 					ut64 addr = r_num_math (core->num, ptr + 2);
 					if (addr) {
 						r_core_cmdf (core, "so %s", ptr + 2);
+						usemyblock = true;
 					}
 				}
 				break;
@@ -2401,6 +2473,7 @@ repeat_arroba:
 						r_core_block_size (core, R_ABS(len));
 						memcpy (core->block, buf, core->blocksize);
 						core->fixedblock = true;
+						usemyblock = true;
 						free (buf);
 					} else {
 						eprintf ("cannot allocate\n");
@@ -2415,6 +2488,7 @@ repeat_arroba:
 					if (out) {
 						r_core_seek (core, r_num_math (core->num, out), 1);
 						free (out);
+						usemyblock = true;
 					}
 				 }
 				break;
@@ -2427,14 +2501,12 @@ repeat_arroba:
 			case 'a': // "@a:"
 				if (ptr[1] == ':') {
 					char *q = strchr (ptr + 2, ':');
-					tmpasm = strdup (r_config_get (core->config, "asm.arch"));
 					if (q) {
 						*q++ = 0;
-						tmpbits = strdup (r_config_get (core->config, "asm.bits"));
-						r_config_set (core->config, "asm.bits", q);
+						int bits = r_num_math (core->num, q);
+						is_bits_set = set_tmp_bits (core, bits, &tmpbits);
 					}
-					r_config_set (core->config, "asm.arch", ptr + 2);
-					// TODO: handle asm.bits
+					is_arch_set = set_tmp_arch (core, ptr + 2, &tmpasm);
 				} else {
 					eprintf ("Usage: pd 10 @a:arm:32\n");
 				}
@@ -2443,6 +2515,7 @@ repeat_arroba:
 				len = strlen (ptr + 2);
 				r_core_block_size (core, len);
 				memcpy (core->block, ptr + 2, len);
+				usemyblock = true;
 				break;
 			default:
 				goto ignore;
@@ -2551,8 +2624,9 @@ next_arroba:
 						r_core_seek (core, addr, 1);
 						r_core_block_read (core);
 					}
-					ret = r_cmd_call (core->rcmd, r_str_trim_head (cmd));
 				}
+				ret = r_cmd_call (core->rcmd, r_str_trim_head (cmd));
+
 			}
 			if (tmpseek) {
 				// restore ranges
@@ -2568,16 +2642,19 @@ next_arroba:
 			*ptr2 = '!';
 			r_core_block_size (core, tmpbsz);
 		}
-		if (tmpasm) {
+		if (is_arch_set) {
+			core->fixedarch = oldfixedarch;
 			r_config_set (core->config, "asm.arch", tmpasm);
-			tmpasm = NULL;
+			R_FREE (tmpasm);
+			is_arch_set = false;
 		}
 		if (tmpfd != -1) {
 			r_io_use_fd (core->io, tmpfd);
 		}
-		if (tmpbits) {
+		if (is_bits_set) {
 			r_config_set (core->config, "asm.bits", tmpbits);
-			tmpbits = NULL;
+			is_bits_set = false;
+			core->fixedbits = oldfixedbits;
 		}
 		if (tmpeval) {
 			r_core_cmd0 (core, tmpeval);
@@ -2604,6 +2681,8 @@ beach:
 	}
 	r_list_free (tmpenvs);
 	core->fixedblock = false;
+	core->fixedarch = oldfixedarch;
+	core->fixedbits = oldfixedbits;
 	return rc;
 fail:
 	rc = -1;
@@ -2652,15 +2731,7 @@ R_API int r_core_cmd_foreach3(RCore *core, const char *cmd, char *each) {
 		}
 		break;
 	case '?':
-		r_cons_printf ("Usage: @@@ [type]     # types:\n"
-			" symbols\n"
-			" sections\n"
-			" imports\n"
-			" regs\n"
-			" threads\n"
-			" comments\n"
-			" functions\n"
-			" flags\n");
+		r_core_cmd_help (core, help_msg_at_at_at);
 		break;
 	case 'c':
 		switch (each[1]) {
@@ -2729,8 +2800,8 @@ R_API int r_core_cmd_foreach3(RCore *core, const char *cmd, char *each) {
 			r_core_seek (core, offorig, 1);
 		}
 		break;
-	case 's':
-		if (each[1] == 'e') {
+	case 'S':
+		{
 			RBinObject *obj = r_bin_cur_object (core->bin);
 			if (obj) {
 				ut64 offorig = core->offset;
@@ -2745,7 +2816,29 @@ R_API int r_core_cmd_foreach3(RCore *core, const char *cmd, char *each) {
 				r_core_seek (core, offorig, 1);
 				r_core_block_size (core, bszorig);
 			}
-		} else {
+		}
+#if ATTIC
+		if (each[1] == 'S') {
+			RListIter *it;
+			RBinSection *sec;
+			RBinObject *obj = r_bin_cur_object (core->bin);
+			int cbsz = core->blocksize;
+			r_list_foreach (obj->sections, it, sec){
+				ut64 addr = sec->vaddr;
+				ut64 size = sec->vsize;
+				// TODO: 
+				//if (R_BIN_SCN_EXECUTABLE & sec->srwx) {
+				//	continue;
+				//}
+				r_core_seek_size (core, addr, size);
+				r_core_cmd (core, cmd, 0);
+			}
+			r_core_block_size (core, cbsz);
+		}
+#endif
+		break;
+	case 's':
+		{
 			// symbols
 			RBinSymbol *sym;
 			ut64 offorig = core->offset;
@@ -2758,26 +2851,22 @@ R_API int r_core_cmd_foreach3(RCore *core, const char *cmd, char *each) {
 		}
 		break;
 	case 'f':
-		switch (each[1]) {
-		case 'l': // flags
-			r_list_foreach (core->flags->flags, iter, flg) {
-				r_core_seek (core, flg->offset, 1);
+		r_list_foreach (core->flags->flags, iter, flg) {
+			r_core_seek (core, flg->offset, 1);
+			r_core_cmd0 (core, cmd);
+		}
+		break;
+	case 'F':
+		{
+			ut64 offorig = core->offset;
+			RAnalFunction *fcn;
+			list = core->anal->fcns;
+			r_list_foreach (list, iter, fcn) {
+				r_cons_printf ("[0x%08"PFMT64x"  %s\n", fcn->addr, fcn->name);
+				r_core_seek (core, fcn->addr, 1);
 				r_core_cmd0 (core, cmd);
 			}
-			break;
-		case 'u': // functions
-			{
-				ut64 offorig = core->offset;
-				RAnalFunction *fcn;
-				list = core->anal->fcns;
-				r_list_foreach (list, iter, fcn) {
-					r_cons_printf ("[0x%08"PFMT64x"  %s\n", fcn->addr, fcn->name);
-					r_core_seek (core, fcn->addr, 1);
-					r_core_cmd0 (core, cmd);
-				}
-				r_core_seek (core, offorig, 1);
-			}
-			break;
+			r_core_seek (core, offorig, 1);
 		}
 		break;
 	}
@@ -2912,23 +3001,7 @@ R_API int r_core_cmd_foreach(RCore *core, const char *cmd, char *each) {
 		}
 		break;
 	case 'i': // "@@i" - function instructions
-		if (each[1] == 'S') {
-			RListIter *it;
-			RBinSection *sec;
-			RBinObject *obj = r_bin_cur_object (core->bin);
-			int cbsz = core->blocksize;
-			r_list_foreach (obj->sections, it, sec){
-				ut64 addr = sec->vaddr;
-				ut64 size = sec->vsize;
-				// TODO: 
-				//if (R_BIN_SCN_EXECUTABLE & sec->srwx) {
-				//	continue;
-				//}
-				r_core_seek_size (core, addr, size);
-				r_core_cmd (core, cmd, 0);
-			}
-			r_core_block_size (core, cbsz);
-		} else {
+		{
 			RListIter *iter;
 			RAnalBlock *bb;
 			int i;

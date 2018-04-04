@@ -1,10 +1,11 @@
-/* radare - LGPL - Copyright 2010-2017 - pancake */
+/* radare - LGPL - Copyright 2010-2018 - pancake */
 
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <r_util.h>
+#include "armass16_const.h"
 
 // TODO: only lo registers accessible in thumb arm
 
@@ -152,12 +153,118 @@ static ArmOp ops[] = {
 	{ NULL }
 };
 
+static const ut32 M_BIT = 0x01;
+static const ut32 S_BIT = 0x02;
+static const ut32 C_BITS = 0x3c;
+static const ut32 DOTN_BIT = 0x40;
+static const ut32 DOTW_BIT = 0x80;
+static const ut32 L_BIT = 0x100;
+static const ut32 X_BIT = 0x200;
+static const ut32 TWO_BIT = 0x400;
+static const ut32 IE_BIT = 0x800;
+static const ut32 ID_BIT = 0x1000;
+
+st8 iflag(char *input) {
+	st8 res = 0;
+	ut8 i;
+	r_str_case (input, false);
+	
+	for (i = 0; i < strlen(input); i++) {
+		switch (input[i]) {
+		case 'a':
+			res |= 0x4;
+			break;
+		case 'i':
+			res |= 0x2;
+			break;
+		case 'f':
+			res |= 0x1;
+			break;
+		default:
+			return -1;
+		}
+	}
+	return res;
+}
+			
+
+ut32 opmask(char *input, char *opcode) {
+	ut32 res = 0;
+	ut32 i;
+	const char *conds[] = {
+		"eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+		"hi", "ls", "ge", "lt", "gt", "le", "al", "nv", 0
+	};
+	r_str_case (input, false);
+	if (strlen (opcode) > strlen (input)) {
+		return 0;
+	}
+	if (r_str_startswith (input, opcode)) {
+		input += strlen (opcode);
+		res |= M_BIT;
+		if (*input == 's') {
+			res |= S_BIT;
+			input++;
+		}
+		if (*input == '2') {
+			res |= TWO_BIT;
+			input++;
+		}
+		for (i = 0; conds[i]; i++) {
+			if (r_str_startswith (input, conds[i])) {
+				res |= i << 2;
+				input += strlen (conds[i]);
+				break;
+			}
+		}
+		if (!conds[i]) {
+			// default is nv (no value)
+			res |= 15 << 2;
+		}
+		if (*input == 'l') {
+			res |= 1 << 8;
+			input++;
+		}
+		if (*input == 'x') {
+			res |= 1 << 9;
+			input++;
+		}
+		for (i = 0; conds[i]; i++) {
+			if (r_str_startswith (input, conds[i])) {
+				res &= i << 2; // NB: cond should be 1f here, otherwise the op is undefined
+				input+= strlen (conds[i]);
+				break;
+			}
+		}
+		if (r_str_startswith (input, "id")) {
+			res |= ID_BIT;
+			input += 2;
+		}
+		if (r_str_startswith (input, "ie")) {
+			res |= IE_BIT;
+			input += 2;
+		}
+		if (r_str_startswith (input, ".n")) {
+			res |= 1 << 6;
+			input += 2;
+		}
+		if (r_str_startswith (input, ".w")) {
+			res |= 1 << 7;
+			input += 2;
+		}
+		if (*input == 0) {
+			return res;
+		}
+	}
+	return 0;
+}
+
 static bool err;
 //decode str as number
-static int getnum(const char *str) {
+static ut64 getnum(const char *str) {
 	char *endptr;
 	err = false;
-	double val;
+	ut64 val;
 
 	if (!str) {
 		err = true;
@@ -166,7 +273,7 @@ static int getnum(const char *str) {
 	while (*str == '$' || *str == '#') {
 		str++;
 	}
-	val = strtod (str, &endptr);
+	val = strtol (str, &endptr, 0);
 	if (str != endptr && *endptr == '\0') {
 		return val;
 	}
@@ -192,6 +299,100 @@ static ut32 getimmed8(const char *str) {
 		}
 		err = 1;
 		return 0;
+	}
+}
+
+st32 firstsigdigit (ut32 num) {
+	st32 f = -1;
+	st32 b = -1;
+	ut32 forwardmask = 0x80000000;
+	ut32 backwardmask = 0x1;
+	ut32 i;
+	for (i = 0; i < 32; i++ ) {
+		if ( (forwardmask & num) && (f == -1)) {
+			f = i;
+		}
+		if ( (backwardmask & num) && (b == -1)) {
+			b = 32-i;
+		}
+		forwardmask >>= 1;
+		backwardmask <<= 1;
+	}
+
+	if ((b-f) < 9) {
+		return f;
+	}
+	return -1;
+}
+
+static ut32 getthbimmed(st32 number) {
+	ut32 res = 0;
+	if (number < 0) {
+		res |= 1 << 18;
+	}
+	number >>= 1;
+	res |= (( number & 0xff) << 8);
+	number >>= 8;
+	res |= ( number & 0x07);
+	number >>= 3;
+	res |= (( number & 0xff) << 24);
+	number >>= 8;
+	res |= (( number & 0x3) << 16);
+	number >>= 2;
+	if (number < 0) {
+		res |= (( number & 0x1) << 3);
+		number >>= 1;
+		res |= (( number & 0x1) << 5);
+	} else {
+		res |= ((!( number & 0x1)) << 3);
+		number >>= 1;
+		res |= ((!( number & 0x1)) << 5);
+	}
+	return res;
+}
+
+static ut32 getthzeroimmed12(ut32 number) {
+	ut32 res = 0;
+	res |= (number & 0x800) << 7;
+	res |= (number & 0x700) >> 4;
+	res |= (number & 0x0ff) << 8;
+	return res;
+}
+
+static ut32 getthimmed12(const char *str) {
+	ut64 num = getnum (str);
+	if (err) {
+		return 0;
+	}
+
+	st32 FSD = 0;
+	ut64 result = 0;
+	if (num <= 0xff) {
+		return num << 8;
+	} else 	if ( ((num & 0xff00ff00) == 0) && ((num & 0x00ff0000) == ((num & 0x000000ff) << 16)) ) {
+		result |= (num & 0x000000ff) << 8;
+		result |= 0x00000010;
+		return result;
+	} else if ( ((num & 0x00ff00ff) == 0) && ((num & 0xff000000) == ((num & 0x0000ff00) << 16)) ) {
+		result |= num & 0x0000ff00;
+		result |= 0x00000020;
+		return result;
+	} else if ( ((num & 0xff000000) == ((num & 0x00ff0000) << 8)) && ((num & 0xff000000) == ((num & 0x0000ff00) << 16)) && ((num &0xff000000) == ((num & 0x000000ff) << 24)) ) {
+		result |= num & 0x0000ff00;
+		result |= 0x00000030;
+		return result;
+	} else {
+		FSD = firstsigdigit(num);
+		if (FSD != -1) {
+		        result |= ((num >> (24-FSD)) & 0x0000007f) << 8;
+			result |= ((8+FSD) & 0x1) << 15;
+			result |= ((8+FSD) & 0xe) << 3;
+			result |= ((8+FSD) & 0x10) << 14;
+			return result;
+		} else {
+			err = true;
+			return 0;
+		}
 	}
 }
 
@@ -226,12 +427,16 @@ static int getshift_unused (const char *s) {
 //ret register #; -1 if failed
 static int getreg(const char *str) {
 	int i;
+	char *ep;
 	const char *aliases[] = { "sl", "fp", "ip", "sp", "lr", "pc", NULL };
 	if (!str || !*str) {
 		return -1;
 	}
 	if (*str == 'r') {
-		int reg = atoi (str + 1);
+		int reg = strtol (str + 1, &ep, 10);
+		if ((ep[0] != '\0') || (str[1] == '\0')) {
+			return -1;
+		}
 		if (reg < 16 && reg >= 0) {
 			return reg;
 		}
@@ -239,6 +444,23 @@ static int getreg(const char *str) {
 	for (i=0; aliases[i]; i++) {
 		if (!strcmpnull (str, aliases[i])) {
 			return 10 + i;
+		}
+	}
+	return -1;
+}
+
+static int getcoproc(const char *str) {
+	char *ep;
+	if (!str || !*str) {
+		return -1;
+	}
+	if (*str == 'p') {
+		int coproc = strtol (str + 1, &ep, 10);
+		if ((ep[0] != '\0') || (str[1] == '\0')) {
+			return -1;
+		}
+		if (coproc < 16 && coproc >= 0) {
+			return coproc;
 		}
 	}
 	return -1;
@@ -272,6 +494,100 @@ static int getlist(char *op) {
 	return list;
 }
 
+static ut32 thumb_getshift(const char *str) {
+	// only immediate shifts are ever used by thumb-2. Bit positions are different from ARM.
+	const char *shifts[] = {
+		"LSL", "LSR", "ASR", "ROR", 0, "RRX"
+	};
+	char *type = strdup (str);
+	char *arg;
+	char *space;
+	ut32 res = 0;
+	ut32 shift = false;
+	err = false;
+	ut32 argn;
+	ut32 i;
+	
+	r_str_case (type,true);
+	
+	if (!strcmp (type, shifts[5])) {
+		// handle RRX alias case
+		res |= 3 << 12;	
+		free (type);
+		return res;
+	}
+	
+	space = strchr (type, ' ');
+	if (!space) {
+		free (type);
+		err = true;
+		return 0;
+	}
+	*space = 0;
+	arg = strdup (++space);
+	
+	for (i = 0; shifts[i]; i++) {
+		if (!strcmp (type, shifts[i])) {
+			shift = true;
+			break;
+		}
+	}
+	if (!shift) {
+		err = true;
+		free (type);
+		free (arg);
+		return 0;
+	}
+	res |= i << 12;
+		
+	argn = getnum (arg);
+	if (err || argn > 32) {
+		err = true;
+		free (type);
+		free (arg);
+		return 0;
+	}
+	res |= ( (argn & 0x1c) << 2);
+	res |= ( (argn & 0x3) << 14);
+
+	free (type);
+	free (arg);
+	return res;
+}
+
+static ut64 thumb_selector(char *args[]) {
+	ut64 res = 0;
+	ut8 i;
+	for (i = 0; i < 15; i++) {
+		if (args[i] == NULL) {
+			break;
+		}
+		if (getreg (args[i]) != -1) {
+			res |= 1 << (i*4);
+			continue;
+		}
+		err = false;
+		getnum (args[i]);
+		if (!err) {
+			res |= 2 << (i*4);
+			continue;
+		}
+		err = false;		
+		thumb_getshift (args[i]);
+		if (!err) {
+			res |= 3 << (i*4);
+			continue;
+		}
+		if (getcoproc (args[i]) != -1) {
+			res |= 4 << (i*4);
+			continue;
+		}
+		res |= 0xf << (i*4);
+	}
+	err = false;
+	return res;
+}
+		
 static ut32 getshift(const char *str) {
 	char type[128];
 	char arg[128];
@@ -380,9 +696,18 @@ static void thumb_swap (ut32 *a) {
 	b[3] = b2[2];
 }
 
+static ut64 thumb_getoffset(char *label, ut64 cur) {
+	ut64 res = r_num_math (NULL, label);
+	res -= 4;
+	res -= cur; // possible integer underflow
+	//printf("thumb_getoffset: %s, %lld, %lld\n", label, res, cur);
+	return res;
+}
+
 // TODO: group similar instructions like for non-thumb
 static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 	int reg, j;
+	ut32 m;
 	ao->o = UT32_MAX;
 	if (!strcmpnull (ao->op, "pop") && ao->a[0]) {
 		ao->o = 0xbc;
@@ -441,19 +766,6 @@ static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 		ao->o |= getlist(ao->opstr) << 8;
 		return 2;
 	} else
-	if (!strcmpnull (ao->op, "cbz")) {
-		ut64 dst = getnum (ao->a[1]);
-		int delta = dst - off;
-		if (delta < 4) {
-			return -1;
-		}
-		ao->o = 0xb1;
-		ao->o += getreg (ao->a[0]) << 8;
-		delta -= 4;
-		delta /= 4;
-		ao->o |= delta << 12;
-		return 2;
-	} else
 	if (!strcmpnull (ao->op, "nop")) {
 		ao->o = 0xbf;
 		return 2;
@@ -479,85 +791,9 @@ static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 		ao->o = 0x40bf;
 		return 2;
 	} else
-	if (!strcmpnull (ao->op, "bkpt")) {
-		ao->o = 0xbe;
-		ao->o |= (0xff & getnum (ao->a[0])) << 8;
-		return 2;
-	} else
-#if 0
-	if (!strcmpnull (ao->op, "and")) {
-		ao->o = 0x40;
-		ao->o |= (0xff & getreg (ao->a[0])) << 8;
-		ao->o |= (0xff & getreg (ao->a[1])) << 11;
-	} else
-#endif
 	if (!strcmpnull (ao->op, "svc")) {
 		ao->o = 0xdf;
 		ao->o |= (0xff & getnum (ao->a[0])) << 8;
-		return 2;
-	} else
-	if (!strcmpnull (ao->op, "b") || !strcmpnull (ao->op, "b.n")) {
-		//uncond branch : PC += 4 + (delta*2)
-		int offset = getnum (ao->a[0]);
-		if (err) {
-			return 0;
-		}
-		int delta = offset - 4 - ao->off;
-		if ((delta < -2048) || (delta > 2046) || (delta & 1)) {
-			eprintf("branch out of range or not even\n");
-			return 0;
-		}
-		ut16 opcode = 0xe000 | ((delta / 2) & 0x7ff);	//11bit offset>>1
-		ao->o = opcode >> 8;
-		ao->o |= (opcode & 0xff) << 8;    // XXX (ut32) ao->o holds the opcode in little-endian format !?
-		return 2;
-	} else
-	if (!strcmpnull (ao->op, "bx")) {
-		ao->o = 0x47;
-		ao->o |= getreg (ao->a[0]) << 11;
-		return 2;
-	} else
-	if (!strcmpnull (ao->op, "blx") || !strcmpnull (ao->op, "bl")) {
-		int reg = getreg (ao->a[0]);
-		if (reg == -1) {
-			ut64 n = r_num_math (NULL, ao->a[0]);
-			ut64 pc = ao->off + 4;
-			if (ao->op[2] == 'x') {
-				n |= pc & 0x2; // care for alignment
-				ao->o = 0xf000e800;
-			} else {
-				ao->o = 0xf000f800;
-			}
-			n -= pc;
-			if ((n < (-1 * (1 << 22)) &&
-			    (n > ((1 << 22) - 2)))) {
-				eprintf("branch out of range or not even\n");
-				return 0;
-			}
-			int l = (n >> 1) & 0x7ff;
-			int h = (n >> 12) & 0x7ff;
-			ao->o |= h << 16 | l;
-			thumb_swap (&ao->o);
-		} else {
-			if (ao->op[2] == 'x') {
-				ao->o = 0x8047;
-				ao->o |= reg << 11;
-			} else {
-				eprintf("bad parameter\n");
-				return 0;
-			}
-		}
-		// XXX: length = 4
-		return 4;
-	} else
-	if (*ao->op == 'b') { // conditional branch
-		ao->o = 0xd0 | arm_opcode_cond (ao, 1);
-		int bdelta = getnum (ao->a[0]) -4;
-		if ((bdelta < -256) || (bdelta > 254) || (bdelta & 1)) {
-			eprintf("branch out of range or not even\n");
-			return 0;
-		}
-		ao->o |= ((bdelta/2) & 0xff) << 8;	// 8bit offset >>1
 		return 2;
 	} else
 	if (!strcmpnull (ao->op, "mov")) {
@@ -769,6 +1005,7 @@ static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 					ao->o |= (7 & a0) << 8;
 					ao->o |= (7 & a1) << 11;
 					ao->o |= (3 & (a2 / 4)) << 14;
+					ao->o |= ((28 & (a2 / 4)) / 4);
 				} else {
 					ao->o = 0x50;
 					ao->o |= (7 & a0) << 8;
@@ -784,40 +1021,6 @@ static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 		ao->o |= (getreg (ao->a[0])) << 8;
 		ao->o |= getreg (ao->a[1]) << 11;
 		return 2;
-	} else
-	if (!strcmpnull (ao->op, "cmp")) {
-		int reg = getreg (ao->a[1]);
-		if (reg != -1) {
-			ao->o = 0x45;
-			ao->o |= (getreg (ao->a[0])) << 8;
-			ao->o |= reg << 11;
-		} else {
-			ao->o = 0x20;
-			ao->o |= 8 + (getreg (ao->a[0]));
-			ao->o |= (getnum (ao->a[1]) & 0xff) << 8;
-		}
-		return 2;
-	} else
-	if (!strcmpnull (ao->op, "and") || !strcmpnull (ao->op, "and.w")) {
-		int reg0 = getreg (ao->a[0]);
-		int reg1 = getreg (ao->a[1]);
-		int reg2 = getreg (ao->a[2]);
-		if (reg0!=-1 && reg1 != -1) {
-			if (reg2 == -1) {
-				reg0 = getreg (ao->a[0]);
-				reg1 = getreg (ao->a[0]);
-				reg2 = getreg (ao->a[1]);
-			}
-			ao->o = 0;
-			ao->o |= 0x00 | reg1;
-			ao->o <<= 8;
-			ao->o |= 0xea;
-			ao->o <<= 8;
-			ao->o |= 0x00 | reg2;
-			ao->o <<= 8;
-			ao->o |= 0xf0 | reg0;
-			return 4;
-		}
 	} else
 	if (!strcmpnull (ao->op, "mul") || !strcmpnull (ao->op, "mul.w")) {
 		int reg0 = getreg (ao->a[0]);
@@ -884,6 +1087,782 @@ static int thumb_assemble(ArmOpcode *ao, ut64 off, const char *str) {
 			ao->o |= (getnum (ao->a[1]) & 0xff) << 8;*/
 		}
 		return 2;
+	} else
+	if ((m = opmask (ao->op, "adc"))) {
+		ut64 argt = thumb_selector(ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+			// a bit naughty, perhaps?
+		case THUMB_REG_REG_CONST: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ao->o = 0x40f10000;
+			ao->o |= (getreg (ao->a[0]));
+			ao->o |= getreg (ao->a[1]) << 24;
+			ao->o |= getthimmed12(ao->a[2]);
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if ( (reg1 < 8) && (reg2 < 8) && !(m & DOTW_BIT)) {
+				ao->o = 0x4041;
+				ao->o |= (reg1 << 8);
+				ao->o |= (reg2 << 11);
+				return 2;
+			}
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+			// a bit naughty, perhaps?
+		case THUMB_REG_REG_REG: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ao->o = 0x40eb0000;
+			ao->o |= (getreg (ao->a[0]));
+			ao->o |= (getreg (ao->a[1])) << 24;
+			ao->o |= (getreg (ao->a[2])) << 8;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG_SHIFT: {
+			ao->a[3] = ao->a[2];
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+			// a bit naughty, perhaps?
+		case THUMB_REG_REG_REG_SHIFT: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ao->o = 0x40eb0000;
+			ao->o |= (getreg (ao->a[0]));
+			ao->o |= (getreg (ao->a[1])) << 24;
+			ao->o |= (getreg (ao->a[2])) << 8;
+			ao->o |= thumb_getshift (ao->a[3]);
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if ((m = opmask (ao->op, "adr"))) {
+		ut64 argt = thumb_selector(ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ut8 reg = getreg(ao->a[0]);
+			st32 label = getnum (ao->a[1]);
+			if ( !(m & DOTW_BIT) && (reg < 8) && (label < 1024) && (label >= 0) && (label % 4 == 0)) {
+				ao->o = 0x00a0;
+				ao->o |= reg;
+				ao->o |= (label / 4) << 8;
+				return 2;
+			} else if ((label < 0) && (label > -4096)) {
+				if (m & DOTN_BIT) {
+					// this is explicitly an error
+					return -1;
+				}
+				ao->o = 0xaff20000;
+				ao->o |= reg;
+				ao->o |= getthzeroimmed12 (-label);
+				return 4;
+			} else if ((label > 0) && (label < 4096)) {
+				if (m & DOTN_BIT) {
+					// this is explicitly an error
+					return -1;
+				}
+				ao->o = 0x0ff20000;
+				ao->o |= reg;
+				ao->o |= getthzeroimmed12 (label);
+				return 4;
+			}
+			return -1;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if ((m = opmask (ao->op, "and"))) {
+		ut64 argt = thumb_selector(ao->a);
+		switch (argt) {
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if (( !(m & DOTW_BIT)) && (reg1 < 8) && (reg2 < 8)) {
+				ao->o = 0x0040;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_REG: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut8 reg3 = getreg (ao->a[2]);
+			ao->o = 0x00ea0000;
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_REG_CONST: {
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_CONST: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut32 imm = getthimmed12(ao->a[2]);
+			ao->o = 0x00f00000;
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= imm;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG_SHIFT: {
+			ao->a[3] = ao->a[2];
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_REG_SHIFT: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut8 reg3 = getreg (ao->a[2]);
+			ut32 shift = thumb_getshift (ao->a[3]);
+			ao->o = 0x00ea0000;
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			ao->o |= shift;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if ((m = opmask (ao->op, "asr"))) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_REG_CONST: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut32 imm = getnum (ao->a[2]);
+			if (((int)imm < 1) && ((int)imm > 32)) {
+				return -1;
+			}
+			if ((reg1 < 8) && (reg2 < 8) && (!(m & DOTW_BIT))) {
+				ao->o = 0x0010;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				ao->o |= (imm & 0x3) << 14;
+				ao->o |= (imm & 0x1c) >> 2;
+				return 2;
+			}
+			ao->o = 0x4fea2000;
+			ao->o |= reg1;
+			ao->o |= reg2 << 8;
+			ao->o |= (imm & 0x3) << 14;
+			ao->o |= (imm & 0x1c) << 2;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if ((reg1 < 8) && (reg2 < 8) && (!(m & DOTW_BIT))) {
+				ao->o = 0x0041;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			ao->a[2] = ao->a[1];
+			ao->a[1] = ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut8 reg3 = getreg (ao->a[2]);
+			ao->o = 0x40fa00f0;
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "b") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch ( ((L_BIT | X_BIT) & m)) {
+		case THUMB_LXSUFFIX: {
+			switch (argt) {
+			case THUMB_REG: {
+				ut32 reg1 = getreg (ao->a[0]);
+				ao->o = 0x8047;
+				ao->o |= reg1 << 11;
+				return 2;
+			        }
+				break;
+			case THUMB_CONST: {
+				st32 offset = thumb_getoffset (ao->a[0], off);
+				ao->o = 0x00f000c0;
+				if ((offset > 16777214) || (offset < -16777216) || (offset % 2 != 0)) {
+					return -1;
+				}
+				offset += off & 0x2; // (Align(PC,4)
+				ao->o |= getthbimmed (offset);
+				return 4;
+			        }
+				break;
+			default:
+				return -1;
+			        }
+		        }
+			break;
+		case THUMB_XSUFFIX: {
+			switch (argt) {
+			case THUMB_REG: {
+				ut32 reg1 = getreg (ao->a[0]);
+				ao->o = 0x0047;
+				ao->o |= reg1 << 11;
+				return 2;
+		                }
+				break;
+			default:
+				return -1;
+			        }
+		        }
+			break;
+		case THUMB_LSUFFIX: {
+			switch (argt) {
+			case THUMB_CONST: {
+				st32 offset = thumb_getoffset (ao->a[0], off);
+				ao->o = 0x00f000d0;
+				if ((offset > 16777214) || (offset < -16777216) || (offset % 2 != 0)) {
+					return -1;
+				}
+				ao->o |= getthbimmed(offset);
+				return 4;
+			        }
+				break;
+			default:
+				return -1;
+			        }
+		        }
+		case THUMB_NOSUFFIX: {
+			if (!(argt == 0x2)) {
+				return -1;
+			}
+			st32 offset = thumb_getoffset (ao->a[0], off);
+			if (offset % 2 != 0) {
+				return -1;
+			}
+
+			if ((m & C_BITS) == C_BITS) {
+				if ((offset >= -2048) && (offset <= 2046) && (!(m & DOTW_BIT))) {
+					ao->o = 0x00e0;
+					ao->o |= ((offset/2 & 0xff) << 8);
+					ao->o |= ((offset/2 & 0x700) >> 8);
+					return 2;
+				}
+				if ((offset < -16777216) || (offset > 16777214) || (offset % 2 != 0)) {
+					return -1;
+				}
+				ao->o = 0x00f00090;
+				ao->o |= getthbimmed(offset);
+				return 4;
+			} else {
+				if ((offset >= -256) && (offset <= 254) && (!(m & DOTW_BIT))) {
+					ao->o = 0x00d0;
+					ao->o |= (ut16) ((offset/2) << 8);
+					ao->o |= ((m & C_BITS) >> 2);
+					return 2;
+				}
+				if ((offset < -1048576) || (offset > 1048574) || (offset % 2 != 0)) {
+					return -1;
+				}
+
+				ao->o = 0x00f00080;
+				ao->o |= (ut32)(offset & 0x80000) >> 16;
+				ao->o |= (ut32)(offset & 0x40000) >> 13;
+				ao->o |= (ut32)(offset & 0x3f000) << 12;
+				ao->o |= (ut32)(offset & 0xe00) >> 9;
+				ao->o |= (ut32)(offset & 0x1fe) << 7;
+				if (offset < 0) {
+					ao->o |= 1 << 18;
+				}
+				ao->o |= (((m & C_BITS) & 0xc) << 28);
+				ao->o |= (((m & C_BITS) & 0x30) << 12);
+				return 4;
+			}
+		        }
+			break;
+		default:
+			// should never get here
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "bfc") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST_CONST: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut32 lsb = getnum (ao->a[1]);
+			ut32 width = getnum (ao->a[2]);
+			ut32 msb = lsb + width - 1;
+			if ((lsb > 31) || (msb > 31)) {
+				return -1;
+			}
+			ao->o = 0x6ff30000;
+			ao->o |= reg1;
+			ao->o |= ((lsb & 0x1c) << 2);
+			ao->o |= ((lsb & 0x3) << 14);
+			ao->o |= (msb << 8);
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "bfi") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_REG_CONST_CONST: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut32 lsb = getnum (ao->a[2]);
+			ut32 width = getnum (ao->a[3]);
+			ut32 msb = lsb + width - 1;
+			if ((lsb > 31) || (msb > 31)) {
+				return -1;
+			}
+			ao->o = 0x60f30000;
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= ((lsb & 0x1c) << 2);
+			ao->o |= ((lsb & 0x3) << 14);
+			ao->o |= (msb << 8);
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "bic") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if ((reg1 < 8) && (reg2 < 8) && (!(m & DOTW_BIT))) {
+				ao->o = 0x8043;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			ao->a[2]=ao->a[1];
+			ao->a[1]=ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_REG: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut8 reg3 = getreg (ao->a[2]);
+			ao->o = 0x20ea0000;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			return 4;
+		        }
+			break;
+		case THUMB_REG_CONST: {
+			ao->a[2]=ao->a[1];
+			ao->a[1]=ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_CONST: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ao->o = 0x20f00000;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= getthimmed12 (ao->a[2]);
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG_SHIFT: {
+			ao->a[3]=ao->a[2];
+			ao->a[2]=ao->a[1];
+			ao->a[1]=ao->a[0];
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_REG_SHIFT: {
+			if (m & DOTN_BIT) {
+				// this is explicitly an error
+				return -1;
+			}
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut8 reg3 = getreg (ao->a[2]);
+			ao->o = 0x20ea0000;
+			if (m & S_BIT) {
+				ao->o |= 1 << 28;
+			}
+			ao->o |= reg1;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			ao->o |= thumb_getshift (ao->a[3]);
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "bkpt") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_CONST: {
+			ut32 num = getnum (ao->a[0]);
+			if (num > 255) {
+				return -1;
+			}
+			ao->o = 0x00be;
+			ao->o |= num << 8;
+			return 2;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cbnz") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut32 offset = thumb_getoffset (ao->a[1], off);
+			if ((reg1 > 7) || (offset > 127) || (offset % 2 != 0)) {
+				return -1;
+			}
+			ao->o = 0x00b9;
+			ao->o |= reg1 << 8;
+			ao->o |= (offset & 0x3e) << 10;
+			ao->o |= (offset & 0x40) >> 5;
+			return 2;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cbz") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut32 offset = thumb_getoffset (ao->a[1], off);
+			if ((reg1 > 7) || (offset > 127) || (offset % 2 != 0)) {
+				return -1;
+			}
+			ao->o = 0x00b1;
+			ao->o |= reg1 << 8;
+			ao->o |= (offset & 0x3e) << 10;
+			ao->o |= (offset & 0x40) >> 5;
+			return 2;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cdp") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_COPROC_CONST_REG_REG_REG: {
+			ao->a[5] = 0;
+		        }
+			//intentional fallthrough
+		case THUMB_COPROC_CONST_REG_REG_REG_CONST: {
+			ut32 coproc = getcoproc (ao->a[0]);
+			ut32 opc1 = getnum (ao->a[1]);
+			ut8 reg1 = getreg (ao->a[2]);
+			ut8 reg2 = getreg (ao->a[3]);
+			ut8 reg3 = getreg (ao->a[4]);
+			ut32 opc2 = getnum (ao->a[5]);
+		        if ((coproc > 15) || (opc1 > 15) || (opc2 > 7)) {
+				return -1;
+			}
+			ao->o = 0x00ee0000;
+			if (m & TWO_BIT) {
+				ao->o |= 1 << 20;
+			}
+			ao->o |= coproc;
+			ao->o |= opc1 << 28;
+			ao->o |= reg1 << 4;
+			ao->o |= reg2 << 24;
+			ao->o |= reg3 << 8;
+			ao->o |= opc2 << 13;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else 	
+	if (( m = opmask (ao->op, "clrex") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_NONE: {
+			ao->o = 0xbff32f8f;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "clz") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ao->o = 0xb0fa80f0;
+			ao->o |= reg1;
+			ao->o |= reg2 << 8;
+			ao->o |= reg2 << 24;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cmn") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut32 num = getthimmed12 (ao->a[1]);
+			ao->o = 0x10f1000f;
+			ao->o |= reg1 << 24;
+			ao->o |= num;
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if ((reg1 < 8) && (reg2 < 8) && (!(m & DOTW_BIT))) {
+				ao->o = 0xc042;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			ao->a[2] = "lsl 0";
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_SHIFT: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut32 shift = thumb_getshift (ao->a[2]);
+			ao->o = 0x10eb000f;
+			ao->o |= reg1 << 24;
+			ao->o |= reg2 << 8;
+			ao->o |= shift;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cmp") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_REG_CONST: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut32 num = getnum(ao->a[1]);
+			if ((num < 256) && (!(m & DOTW_BIT))) {
+				ao->o = 0x0028;
+				ao->o |= reg1;
+				ao->o |= num << 8;
+				return 2;
+			}
+			num = getthimmed12 (ao->a[1]);
+			ao->o = 0xb0f1000f;
+			ao->o |= reg1 << 24;
+			ao->o |= num;
+			return 4;
+		        }
+			break;
+		case THUMB_REG_REG: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			if ((reg1 < 8) && (reg2 < 8) && (!(m & DOTW_BIT))) {
+				ao->o = 0x8042;
+				ao->o |= reg1 << 8;
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			if (!(m & DOTW_BIT)) {
+				ao->o = 0x0045;
+				ao->o |= ((reg1 & 0x7) << 8);
+				ao->o |= ((reg1 & 0x8) << 12);
+				ao->o |= reg2 << 11;
+				return 2;
+			}
+			ao->a[2] = "lsl 0";
+		        }
+			// intentional fallthrough
+		case THUMB_REG_REG_SHIFT: {
+			ut8 reg1 = getreg (ao->a[0]);
+			ut8 reg2 = getreg (ao->a[1]);
+			ut32 shift = thumb_getshift (ao->a[2]);
+			ao->o = 0xb0eb000f;
+			ao->o |= reg1 << 24;
+			ao->o |= reg2 << 8;
+			ao->o |= shift;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
+	} else
+	if (( m = opmask (ao->op, "cps") )) {
+		ut64 argt = thumb_selector (ao->a);
+		switch (argt) {
+		case THUMB_OTHER: {
+			st8 aif = iflag(ao->a[0]);
+			if (aif == -1) {
+				return -1;
+			}
+			if (!(m & DOTW_BIT)) {
+				ao->o = 0x60b6;
+				ao->o |= aif << 8;
+				if (m & ID_BIT) {
+					ao->o |= 1 << 12;
+				}
+				return 2;
+			}
+			ao->a[1] = "0";
+		        }
+			// intentional fallthrough
+		case THUMB_OTHER_CONST: {
+			st8 aif = iflag(ao->a[0]);
+			ut8 mode = getnum (ao->a[1]);
+			if ((mode > 31) || (aif == -1)) {
+				return -1;
+			}
+			ao->o = 0xaff30085;
+			ao->o |= mode << 8;
+			ao->o |= aif << 13;
+			if (m & ID_BIT) {
+				ao->o |= 1 << 1;
+			}
+			return 4;
+		        }
+			break;
+		case THUMB_CONST: {
+			ut8 mode = getnum (ao->a[0]);
+			if ((m & ID_BIT) || (m & IE_BIT) || (mode > 31)) {
+				return -1;
+			}
+			ao->o = 0xaff30081;
+			ao->o |= mode << 8;
+			return 4;
+		        }
+			break;
+		default:
+			return -1;
+		}
 	} else
 	if (!strcmpnull (ao->op, "sub")) {
 		int reg = getreg (ao->a[1]);

@@ -344,11 +344,22 @@ R_API bool r_io_reopen(RIO* io, int fd, int flags, int mode) {
 	}
 	//does this really work, or do we have to handler debuggers ugly
 	uri = old->referer? old->referer: old->uri;
+#if __WINDOWS__ //TODO: workaround, see https://github.com/radare/radare2/issues/8840
+	if (!r_io_desc_close (old)) {
+		return false; // TODO: this is an unrecoverable scenario
+	}
+	if (!(new = r_io_open_nomap (io, uri, flags, mode))) {
+		return false;
+	}
+	r_io_desc_exchange (io, old->fd, new->fd);
+	return true;
+#else
 	if (!(new = r_io_open_nomap (io, uri, flags, mode))) {
 		return false;
 	}
 	r_io_desc_exchange (io, old->fd, new->fd);
 	return r_io_desc_close (old); // magic
+#endif // __WINDOWS__
 }
 
 R_API int r_io_close_all(RIO* io) { // what about undo?
@@ -729,6 +740,7 @@ R_API int r_io_bind(RIO* io, RIOBind* bnd) {
 	bnd->fd_write_at = r_io_fd_write_at;
 	bnd->fd_is_dbg = r_io_fd_is_dbg;
 	bnd->fd_get_name = r_io_fd_get_name;
+	bnd->fd_get_map = r_io_map_get_for_fd;
 	bnd->fd_remap = r_io_map_remap_fd;
 	bnd->al_sort = r_io_accesslog_sort;
 	bnd->al_free = r_io_accesslog_free;

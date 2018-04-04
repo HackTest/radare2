@@ -70,6 +70,7 @@ R_API RAnal *r_anal_new() {
 	anal->decode = true; // slow slow if not used
 	anal->gp = 0LL;
 	anal->sdb = sdb_new0 ();
+	anal->cpp_abi = R_ANAL_CPP_ABI_ITANIUM;
 	anal->opt.depth = 32;
 	anal->opt.noncode = false; // do not analyze data by default
 	r_space_new (&anal->meta_spaces, "CS", meta_unset_for, meta_count_for, NULL, anal);
@@ -102,9 +103,6 @@ R_API RAnal *r_anal_new() {
 	anal->lineswidth = 0;
 	anal->fcns = r_anal_fcn_list_new ();
 	anal->fcn_tree = NULL;
-#if USE_NEW_FCN_STORE
-	anal->fcnstore = r_listrange_new ();
-#endif
 	anal->refs = r_anal_ref_list_new ();
 	anal->types = r_anal_type_list_new ();
 	anal->ref_cache = 0;
@@ -139,6 +137,7 @@ R_API RAnal *r_anal_free(RAnal *a) {
 	r_space_free (&a->zign_spaces);
 	r_anal_pin_fini (a);
 	r_list_free (a->refs);
+	r_syscall_free (a->syscall);
 	r_list_free (a->types);
 	r_reg_free (a->reg);
 	r_anal_op_free (a->queued);
@@ -328,7 +327,7 @@ R_API ut8 *r_anal_mask(RAnal *anal, int size, const ut8 *data, ut64 at) {
 	memset (ret, 0xff, size);
 
 	while (idx < size) {
-		if ((oplen = r_anal_op (anal, op, at, data + idx, size - idx)) < 1) {
+		if ((oplen = r_anal_op (anal, op, at, data + idx, size - idx, R_ANAL_OP_MASK_ALL)) < 1) {
 			break;
 		}
 		if ((op->ptr != UT64_MAX || op->jump != UT64_MAX) && op->nopcode != 0) {
@@ -337,7 +336,7 @@ R_API ut8 *r_anal_mask(RAnal *anal, int size, const ut8 *data, ut64 at) {
 		idx += oplen;
 	}
 
-	free (op);
+	r_anal_op_free (op);
 
 	return ret;
 }
@@ -383,7 +382,7 @@ R_API RAnalOp *r_anal_op_hexstr(RAnal *anal, ut64 addr, const char *str) {
 		return NULL;
 	}
 	len = r_hex_str2bin (str, buf);
-	r_anal_op (anal, op, addr, buf, len);
+	r_anal_op (anal, op, addr, buf, len, R_ANAL_OP_MASK_ALL);
 	free (buf);
 	return op;
 }
@@ -417,10 +416,6 @@ R_API int r_anal_purge (RAnal *anal) {
 	r_list_free (anal->fcns);
 	anal->fcns = r_anal_fcn_list_new ();
 	anal->fcn_tree = NULL;
-#if USE_NEW_FCN_STORE
-	r_listrange_free (anal->fcnstore);
-	anal->fcnstore = r_listrange_new ();
-#endif
 	r_list_free (anal->refs);
 	anal->refs = r_anal_ref_list_new ();
 	r_list_free (anal->types);
@@ -590,7 +585,7 @@ bool noreturn_recurse(RAnal *anal, ut64 addr) {
 		return false;
 	}
 	// TODO: check return value
-	(void)r_anal_op (anal, &op, addr, bbuf, sizeof (bbuf));
+	(void)r_anal_op (anal, &op, addr, bbuf, sizeof (bbuf), R_ANAL_OP_MASK_ALL);
 	switch (op.type & R_ANAL_OP_TYPE_MASK) {
 	case R_ANAL_OP_TYPE_JMP:
 		if (op.jump == UT64_MAX) {

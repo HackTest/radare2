@@ -139,12 +139,13 @@ R_API bool r_core_visual_esil(RCore *core) {
 	RAsmOp asmop;
 	RAnalOp analop;
 	ut8 buf[sizeof (ut64)];
+	unsigned int addrsize = r_config_get_i (core->config, "esil.addr.size");
 
 	if (core->blocksize < sizeof (ut64)) {
 		return false;
 	}
 	memcpy (buf, core->block, sizeof (ut64));
-	esil = r_anal_esil_new (20, 0);
+	esil = r_anal_esil_new (20, 0, addrsize);
 	esil->anal = core->anal;
 	r_anal_esil_set_pc (esil, core->offset);
 	for (;;) {
@@ -152,7 +153,7 @@ R_API bool r_core_visual_esil(RCore *core) {
 		// bool use_color = core->print->flags & R_PRINT_FLAGS_COLOR;
 		(void) r_asm_disassemble (core->assembler, &asmop, buf, sizeof (ut64));
 		analop.type = -1;
-		(void)r_anal_op (core->anal, &analop, core->offset, buf, sizeof (ut64));
+		(void)r_anal_op (core->anal, &analop, core->offset, buf, sizeof (ut64), R_ANAL_OP_MASK_ALL);
 		analopType = analop.type & R_ANAL_OP_TYPE_MASK;
 		r_cons_printf ("r2's esil debugger:\n\n");
 		r_cons_printf ("pos: %d\n", x);
@@ -291,7 +292,7 @@ static bool edit_bits (RCore *core) {
 		bool use_color = core->print->flags & R_PRINT_FLAGS_COLOR;
 		(void) r_asm_disassemble (core->assembler, &asmop, buf, sizeof (ut64));
 		analop.type = -1;
-		(void)r_anal_op (core->anal, &analop, core->offset, buf, sizeof (ut64));
+		(void)r_anal_op (core->anal, &analop, core->offset, buf, sizeof (ut64), R_ANAL_OP_MASK_ALL);
 		analopType = analop.type & R_ANAL_OP_TYPE_MASK;
 		r_cons_printf ("r2's bit editor:\n\n");
 		{
@@ -2587,7 +2588,7 @@ R_API void r_core_seek_next(RCore *core, const char *type) {
 	ut64 next = UT64_MAX;
 	if (strstr (type, "opc")) {
 		RAnalOp aop;
-		if (r_anal_op (core->anal, &aop, core->offset, core->block, core->blocksize)) {
+		if (r_anal_op (core->anal, &aop, core->offset, core->block, core->blocksize, R_ANAL_OP_MASK_ALL)) {
 			next = core->offset + aop.size;
 		} else {
 			eprintf ("Invalid opcode\n");
@@ -2864,7 +2865,7 @@ repeat:
 		}
 		// TODO: get the aligned instruction even if the cursor is in the middle of it.
 		r_anal_op (core->anal, &op, off,
-			core->block + off - core->offset, 32);
+			core->block + off - core->offset, 32, R_ANAL_OP_MASK_ALL);
 
 		tgt_addr = op.jump != UT64_MAX ? op.jump : op.ptr;
 		if (op.var) {
@@ -2967,9 +2968,9 @@ repeat:
 			RAnalOp op;
 			ut64 size;
 			if (r_anal_op (core->anal, &op, off, core->block+delta,
-					core->blocksize-delta)) {
+					core->blocksize-delta, R_ANAL_OP_MASK_ALL)) {
 				size = off - fcn->addr + op.size;
-				r_anal_fcn_resize (fcn, size);
+				r_anal_fcn_resize (core->anal, fcn, size);
 			}
 		}
 		}
@@ -3102,7 +3103,7 @@ repeat:
 			int funsize = 0;
 			RAnalFunction *fcn = r_anal_get_fcn_in (core->anal, core->offset, 0);
 			if (fcn) {
-				r_anal_fcn_resize (fcn, core->offset - fcn->addr);
+				r_anal_fcn_resize (core->anal, fcn, core->offset - fcn->addr);
 			}
 			//int depth = r_config_get_i (core->config, "anal.depth");
 			if (core->print->cur_enabled) {
@@ -3116,7 +3117,7 @@ repeat:
 			r_cons_break_pop ();
 			if (funsize) {
 				RAnalFunction *f = r_anal_get_fcn_in (core->anal, off, -1);
-				r_anal_fcn_set_size (f, funsize);
+				r_anal_fcn_set_size (core->anal, f, funsize);
 			}
 		}
 		break;
@@ -3157,13 +3158,15 @@ R_API void r_core_visual_colors(RCore *core) {
 		}
 		sprintf (color, "rgb:%x%x%x", rcolor.r, rcolor.g, rcolor.b);
 		r_cons_printf ("# Colorscheme %d - Use '.' and ':' to randomize palette\n"
-			"# Press 'rRgGbB', 'jk' or 'q'\nec %s %s   # %d (%s)\n",
+			"# Press 'rRgGbB', 'jk' or 'q'\nec %s %s   # %d (\\x1b%s)\n",
 			opt, k, color, atoi (cstr+7), cstr+1);
 		r_core_cmdf (core, "ec %s %s", k, color);
 		char * res = r_core_cmd_str (core, "pd $r");
 		int h, w = r_cons_get_size (&h);
 		char *body = r_str_ansi_crop (res, 0, 0, w, h - 4);
-		r_cons_printf("%s", body);
+		if (body) {
+			r_cons_printf ("%s", body);
+		}
 		r_cons_flush ();
 		ch = r_cons_readchar ();
 		ch = r_cons_arrow_to_hjkl (ch);
@@ -3175,7 +3178,9 @@ R_API void r_core_visual_colors(RCore *core) {
 		CASE_RGB ('G','g',rcolor.g);
 		CASE_RGB ('B','b',rcolor.b);
 		case 'Q':
-		case 'q': return;
+		case 'q': 
+			free (body);
+			return;
 		case 'k': opt--; break;
 		case 'j': opt++; break;
 		case 'K': opt=0; break;
